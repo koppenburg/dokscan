@@ -446,7 +446,8 @@
   }
 
   // Bildverarbeitung im Hintergrund-Thread (Web Worker); Rückfall auf den Hauptthread, falls nicht verfügbar.
-  const Proc = (() => {
+  /** Kleiner Client für einen Hintergrund-Thread (proc-worker.js). */
+  function workerClient() {
     let worker = null, ready = null, seq = 0;
     const pending = new Map();
     const call = (job, timeout, transfer = []) => new Promise((resolve) => {
@@ -467,6 +468,34 @@
       })();
       return ready;
     }
+    return { init, call };
+  }
+
+  // Eigener Thread für die Live-Erkennung, damit sie nicht auf die Seitenverarbeitung warten muss
+  const LiveW = (() => {
+    const w = workerClient();
+    let resizeOk = true;
+    async function detect(videoEl, size) {
+      if (!window.createImageBitmap || !(await w.init())) return null;
+      const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+      const s = Math.min(1, size / Math.max(vw, vh));
+      let bitmap = null;
+      if (resizeOk) {
+        // bereits beim Kopieren verkleinern (schnell, auf der Grafikkarte)
+        try { bitmap = await createImageBitmap(videoEl, { resizeWidth: Math.round(vw * s), resizeHeight: Math.round(vh * s), resizeQuality: 'low' }); }
+        catch { resizeOk = false; }
+      }
+      if (!bitmap) {
+        try { bitmap = await createImageBitmap(videoEl); } catch { return null; }
+      }
+      const r = await w.call({ type: 'live', bitmap, size }, 5000, [bitmap]);
+      return r.ok ? r.result : null;
+    }
+    return { detect, init: w.init };
+  })();
+
+  const Proc = (() => {
+    const { init, call } = workerClient();
     async function run(job) {
       if (await init()) {
         const r = await call(job, 90000);
@@ -745,6 +774,7 @@
   const sigCanvas = document.createElement('canvas');
   sigCanvas.width = 24; sigCanvas.height = 24;
   function signature() {
+    if (live.sig) return live.sig; // aus dem Live-Thread
     const x = sigCanvas.getContext('2d', { willReadFrequently: true });
     // aus dem bereits verkleinerten Bild der Live-Erkennung – das Kamerabild nicht ein zweites Mal auslesen
     x.drawImage(Img.lastFrame() || video, 0, 0, 24, 24);
@@ -769,14 +799,17 @@
     if (!settings.autoShoot || !settings.autoCrop || cam.shooting) { resetAuto(); return; }
     if (auto.waiting) {
       // erst wieder scharf schalten, wenn Dokument weg war oder Bild sich klar geändert hat
-      auto.lost = raw ? 0 : auto.lost + 1;
-      if (auto.lost >= 2 || (auto.sig && sigDiff(signature(), auto.sig) > 10)) { auto.waiting = false; auto.lost = 0; }
+      // „Seite weg“ erst nach mindestens 0,5 s ohne Dokument (Umblättern), nicht bei kurzen Aussetzern
+      const t = performance.now();
+      if (raw) auto.lost = 0; else if (!auto.lost) auto.lost = t;
+      if ((auto.lost && t - auto.lost >= 500) || (auto.sig && sigDiff(signature(), auto.sig) > 10)) { auto.waiting = false; auto.lost = 0; }
       resetAuto();
       return;
     }
     if (!raw) {
-      // einzelne Aussetzer der Erkennung tolerieren
-      if (++auto.miss > 1) resetAuto();
+      // kurze Aussetzer der Erkennung (< 0,3 s) tolerieren
+      if (!auto.miss) auto.miss = performance.now();
+      else if (performance.now() - auto.miss > 300) resetAuto();
       return;
     }
     auto.miss = 0;
@@ -806,56 +839,115 @@
   });
 
   // Live-Randerkennung im Kamerabild
-  const live = { timer: null, quad: null, miss: 0, on: false, cost: 0 };
+  // Erkennung läuft (wenn möglich) in einem eigenen Thread so oft wie möglich (max. ~20/s);
+  // der Rahmen wird bei jedem Bildschirmbild weich zur zuletzt erkannten Position nachgeführt.
+  const LIVE_MIN_INTERVAL = 50;   // ms zwischen zwei Erkennungen (≈ 20/s)
+  const LIVE_HOLD_MS = 450;       // so lange bleibt der Rahmen nach Aussetzern stehen
+  const live = { on: false, gen: 0, quad: null, shown: null, sig: null, lastSeen: 0, jump: null, raf: 0, found: false, useWorker: null };
+
   function startLive() {
     stopLive();
     if (!settings.autoCrop) return;
     live.on = true;
-    live.timer = setTimeout(liveTick, 100);
+    const gen = ++live.gen;
+    liveLoop(gen);
+    live.raf = requestAnimationFrame(renderLive);
   }
   function stopLive() {
     resetAuto();
     auto.waiting = false;
     live.on = false;
-    clearTimeout(live.timer);
-    live.timer = null;
+    live.gen++;
+    cancelAnimationFrame(live.raf);
     live.quad = null;
-    live.miss = 0;
+    live.shown = null;
+    live.sig = null;
+    live.jump = null;
     drawLive();
   }
-  function liveTick() {
-    if (!live.on) return;
-    const t0 = performance.now();
-    try { liveStep(); } catch (e) { console.warn(e); }
-    // Takt an die Gerätegeschwindigkeit anpassen: höchstens ~40 % der Rechenzeit für die Live-Erkennung
-    live.cost = live.cost ? live.cost * 0.7 + (performance.now() - t0) * 0.3 : performance.now() - t0;
-    if (live.on) live.timer = setTimeout(liveTick, Math.max(150, Math.min(1000, live.cost * 1.5)));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  async function liveLoop(gen) {
+    if (live.useWorker === null) live.useWorker = await LiveW.init();
+    while (live.on && live.gen === gen) {
+      if (!video.videoWidth || cam.shooting || document.hidden) { await sleep(120); continue; }
+      const t0 = performance.now();
+      let res = null;
+      if (live.useWorker) {
+        res = await LiveW.detect(video, 192);
+        if (!res) live.useWorker = false; // Rückfall auf den Hauptthread
+      }
+      if (!res) {
+        let q = null;
+        try { q = Img.detect(video, 160, true); } catch { q = null; }
+        res = { quad: q, sig: null };
+      }
+      if (!live.on || live.gen !== gen) break;
+      onDetection(res.quad, res.sig);
+      const cost = performance.now() - t0;
+      // im Hauptthread mehr Pause lassen, damit die Bedienung flüssig bleibt
+      await sleep(live.useWorker ? Math.max(0, LIVE_MIN_INTERVAL - cost) : Math.max(120, cost * 1.5));
+    }
   }
-  function liveStep() {
-    if (!video.videoWidth || cam.shooting || document.hidden) return;
-    let q = null;
-    try { q = Img.detect(video, 160, true); } catch { q = null; }
+
+  function onDetection(q, sig) {
+    const now = performance.now();
+    live.count = (live.count || 0) + 1;
+    if (sig) live.sig = sig;
     if (q) {
-      live.miss = 0;
-      live.quad = live.quad ? live.quad.map((p, i) => [p[0] * 0.4 + q[i][0] * 0.6, p[1] * 0.4 + q[i][1] * 0.6]) : q;
-    } else if (++live.miss > 3) {
+      if (live.quad && cornerDist(q, live.quad) > 0.08) {
+        // großer Sprung: erst übernehmen, wenn er sich bestätigt (verhindert Flackern durch Fehlerkennungen)
+        if (live.jump && cornerDist(q, live.jump) < 0.04) { live.quad = q; live.jump = null; }
+        else live.jump = q;
+      } else {
+        // Ruhezone: winzige Abweichungen (Bildrauschen) ignorieren, damit der Rahmen still steht
+        if (!live.quad || cornerDist(q, live.quad) > 0.006) live.quad = q;
+        live.jump = null;
+      }
+      live.lastSeen = now;
+    } else if (live.quad && now - live.lastSeen > LIVE_HOLD_MS) {
       live.quad = null;
+      live.jump = null;
     }
     try { autoTick(q); } catch (e) { console.warn(e); }
-    drawLive();
+    const found = !!live.quad;
+    if (found !== live.found) { live.found = found; updateCamUi(); }
   }
+
+  // Bei jedem Bildschirmbild weich nachführen (kein Ruckeln zwischen den Erkennungen)
+  function renderLive() {
+    if (!live.on) return;
+    const t = live.quad;
+    if (!t) live.shown = null;
+    else if (!live.shown) live.shown = t.map((p) => p.slice());
+    else live.shown = live.shown.map((p, i) => {
+      // große Bewegung → schnell folgen, kleines Zittern → ruhig glätten
+      const dx = t[i][0] - p[0], dy = t[i][1] - p[1];
+      const a = Math.min(0.7, 0.2 + Math.hypot(dx, dy) * 12);
+      return [p[0] + dx * a, p[1] + dy * a];
+    });
+    drawLive();
+    live.raf = requestAnimationFrame(renderLive);
+  }
+
+  let liveBox = null;
+  const measureLiveBox = () => { liveBox = null; };
+  window.addEventListener('resize', measureLiveBox);
   function drawLive() {
     const svg = $('#camQuad'), poly = $('#camQuadPoly');
-    const found = !!live.quad && !!video.videoWidth;
-    $('#camera').classList.toggle('doc-found', found);
-    updateCamUi();
-    if (!found) { poly.removeAttribute('points'); return; }
-    const r = svg.getBoundingClientRect();
+    const q = live.shown;
+    const found = !!q && !!video.videoWidth;
+    $('#camera').classList.toggle('doc-found', !!live.quad);
+    if (!found) { if (poly.hasAttribute('points')) poly.removeAttribute('points'); return; }
     const vw = video.videoWidth, vh = video.videoHeight;
-    const s = Math.min(r.width / vw, r.height / vh);
-    const ox = (r.width - vw * s) / 2, oy = (r.height - vh * s) / 2;
-    svg.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
-    poly.setAttribute('points', live.quad.map(([x, y]) => `${(ox + x * vw * s).toFixed(1)},${(oy + y * vh * s).toFixed(1)}`).join(' '));
+    if (!liveBox || liveBox.vw !== vw || liveBox.vh !== vh) {
+      const r = svg.getBoundingClientRect();
+      const s = Math.min(r.width / vw, r.height / vh);
+      liveBox = { vw, vh, s, ox: (r.width - vw * s) / 2, oy: (r.height - vh * s) / 2 };
+      svg.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
+    }
+    const { s, ox, oy } = liveBox;
+    poly.setAttribute('points', q.map(([x, y]) => `${(ox + x * vw * s).toFixed(1)},${(oy + y * vh * s).toFixed(1)}`).join(' '));
   }
 
   async function startStream() {
@@ -1669,5 +1761,5 @@
   init();
 
   // Für Tests
-  window.DokScan = { get pages() { return pages; }, get docs() { return docs; }, get currentDoc() { return currentDoc; }, whenIdle, addFiles, buildPdf, settings, workerReady: () => Proc.init(), ensureOcr, openDoc, importInto };
+  window.DokScan = { get pages() { return pages; }, get docs() { return docs; }, get currentDoc() { return currentDoc; }, get liveCount() { return live.count || 0; }, whenIdle, addFiles, buildPdf, settings, workerReady: () => Proc.init(), ensureOcr, openDoc, importInto };
 })();
