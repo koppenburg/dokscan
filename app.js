@@ -66,7 +66,7 @@
 
   const record = (p, order) => ({
     id: p.id, order, created: p.created, original: p.original,
-    rotation: p.rotation, corners: p.corners, filter: p.filter,
+    rotation: p.rotation, corners: p.corners, filter: p.filter, autoDetect: !!(p.autoDetect && !p.processed),
     processed: p.processed, pw: p.pw, ph: p.ph, thumb: p.thumb,
   });
   const persist = (p) => { const i = pages.indexOf(p); if (i >= 0) DB.put(record(p, i)); };
@@ -134,38 +134,72 @@
     idleWaiters.splice(0).forEach((r) => r());
   }
 
-  async function processPage(p) {
-    const img = await Img.load(p.original);
-    let c = Img.draw(img, MAX_DIM);
-    const r = Img.rotate(c, p.rotation);
-    if (r !== c) { Img.release(c); c = r; }
-    if (!Img.isFull(p.corners)) {
-      const w = Img.warp(c, p.corners, MAX_DIM);
-      Img.release(c); c = w;
+  // Bildverarbeitung im Hintergrund-Thread (Web Worker); Rückfall auf den Hauptthread, falls nicht verfügbar.
+  const Proc = (() => {
+    let worker = null, ready = null, seq = 0;
+    const pending = new Map();
+    const call = (job, timeout, transfer = []) => new Promise((resolve) => {
+      const id = ++seq;
+      const timer = setTimeout(() => { pending.delete(id); resolve({ ok: false, error: 'Zeitüberschreitung' }); }, timeout);
+      pending.set(id, (r) => { clearTimeout(timer); resolve(r); });
+      worker.postMessage({ id, job }, transfer);
+    });
+    function init() {
+      if (ready) return ready;
+      ready = (async () => {
+        if (!window.Worker || typeof OffscreenCanvas === 'undefined') return false;
+        try { worker = new Worker('proc-worker.js'); } catch { return false; }
+        worker.onmessage = (e) => { const cb = pending.get(e.data.id); if (cb) { pending.delete(e.data.id); cb(e.data); } };
+        worker.onerror = () => { pending.forEach((cb) => cb({ ok: false, error: 'Worker-Fehler' })); pending.clear(); };
+        const r = await call('ping', 5000);
+        return !!r.ok;
+      })();
+      return ready;
     }
-    Img.filter(c, p.filter);
-    const processed = await Img.toBlob(c, 'image/jpeg', 0.9);
-    const t = Img.draw(c, 420);
-    const thumb = await Img.toBlob(t, 'image/jpeg', 0.8);
-    const res = { processed, thumb, pw: c.width, ph: c.height };
-    Img.release(t); Img.release(c);
+    async function run(job) {
+      if (await init()) {
+        const r = await call(job, 90000);
+        if (r.ok) return r.result;
+        console.warn('Worker:', r.error);
+      }
+      return Img.processPage(job);
+    }
+    /** Kamerabild im Hintergrund als JPEG speichern; null, wenn nicht möglich (dann im Hauptthread). */
+    async function encodeFrame(videoEl, maxDim) {
+      if (!window.createImageBitmap || !(await init())) return null;
+      let bitmap;
+      try { bitmap = await createImageBitmap(videoEl); } catch { return null; }
+      const r = await call({ type: 'encode', bitmap, maxDim }, 30000, [bitmap]);
+      return r.ok ? r.result : null;
+    }
+    return { run, init, encodeFrame };
+  })();
+
+  async function processPage(p) {
+    const res = await Proc.run({
+      original: p.original, rotation: p.rotation, corners: p.corners, filter: p.filter,
+      autoDetect: !!p.autoDetect, maxDim: MAX_DIM,
+    });
+    if (!p.autoDetect) delete res.corners;
+    else res.autoDetect = false;
     return res;
   }
 
-  function addFromCanvas(c, hint) {
-    const job = addPage(c, hint);
+  /** Registriert eine laufende Aufnahme, damit die PDF-Erstellung darauf wartet. */
+  function track(job) {
     adding.add(job);
     job.finally(() => adding.delete(job)).catch(() => {});
     return job;
   }
 
-  async function addPage(c, hint) {
-    let corners = Img.FULL.map((x) => x.slice());
-    if (settings.autoCrop) {
-      try { corners = Img.detect(c) || hint || corners; } catch (e) { console.warn(e); }
-    }
-    const original = await Img.toBlob(c, 'image/jpeg', 0.92);
-    const p = { id: uid(), created: Date.now(), original, rotation: 0, corners, filter: settings.filter, processed: null, thumb: null };
+  function addFromCanvas(c, hint) {
+    return track(Img.toBlob(c, 'image/jpeg', 0.92).then((original) => addOriginal(original, hint)));
+  }
+
+  function addOriginal(original, hint) {
+    // Ränder: vorläufig aus der Live-Erkennung, genau erkannt wird im Hintergrund auf dem vollen Bild
+    const corners = (settings.autoCrop && hint) || Img.FULL.map((x) => x.slice());
+    const p = { id: uid(), created: Date.now(), original, rotation: 0, corners, filter: settings.filter, processed: null, thumb: null, autoDetect: settings.autoCrop };
     pages.push(p);
     renderGrid();
     persist(p);
@@ -326,7 +360,7 @@
   }
 
   function updateCamUi() {
-    $('#camDone').disabled = cam.added === 0;
+    $('#camDone').disabled = false;
     $('#camCount').textContent = String(cam.added);
     $('#camLast').hidden = cam.added === 0;
     const page = `Seite ${pages.length + 1}`;
@@ -344,15 +378,16 @@
   // ---------- Automatisch auslösen ----------
   // Ist der Rand ~1,2 s lang ruhig erkannt, wird ausgelöst. Danach wird erst wieder ausgelöst,
   // wenn das Dokument kurz weg war (Seite umgeblättert) oder sich das Bild deutlich geändert hat.
-  const AUTO_STABLE_TICKS = 5;       // × 250 ms
-  const AUTO_MOVE_TICK = 0.012;      // erlaubte Eckenbewegung pro Messung (Anteil der Bildgröße)
-  const AUTO_MOVE_TOTAL = 0.025;     // erlaubte Abweichung über die ganze Haltezeit
-  const auto = { stable: 0, anchor: null, prev: null, waiting: false, sig: null, armed: false, lost: 0 };
+  const AUTO_HOLD_MS = 1000;         // so lange muss das Dokument ruhig erkannt sein
+  const AUTO_MOVE_TICK = 0.02;       // erlaubte Eckenbewegung zwischen zwei Messungen (Anteil der Bildgröße)
+  const AUTO_MOVE_TOTAL = 0.035;     // erlaubte Abweichung über die ganze Haltezeit
+  const auto = { since: 0, anchor: null, prev: null, waiting: false, sig: null, armed: false, lost: 0, miss: 0 };
   const sigCanvas = document.createElement('canvas');
   sigCanvas.width = 24; sigCanvas.height = 24;
   function signature() {
     const x = sigCanvas.getContext('2d', { willReadFrequently: true });
-    x.drawImage(video, 0, 0, 24, 24);
+    // aus dem bereits verkleinerten Bild der Live-Erkennung – das Kamerabild nicht ein zweites Mal auslesen
+    x.drawImage(Img.lastFrame() || video, 0, 0, 24, 24);
     const d = x.getImageData(0, 0, 24, 24).data;
     const s = new Float32Array(576);
     for (let i = 0; i < 576; i++) s[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
@@ -361,7 +396,7 @@
   const sigDiff = (a, b) => { let t = 0; for (let i = 0; i < a.length; i++) t += Math.abs(a[i] - b[i]); return t / a.length; };
   const cornerDist = (a, b) => Math.max(...a.map((p, i) => Math.hypot(p[0] - b[i][0], p[1] - b[i][1])));
   function resetAuto() {
-    auto.stable = 0; auto.anchor = null; auto.prev = null; auto.armed = false;
+    auto.since = 0; auto.anchor = null; auto.prev = null; auto.armed = false; auto.miss = 0;
     setArming(0);
   }
   function setArming(p) {
@@ -379,17 +414,22 @@
       resetAuto();
       return;
     }
-    if (!raw) { resetAuto(); return; }
+    if (!raw) {
+      // einzelne Aussetzer der Erkennung tolerieren
+      if (++auto.miss > 1) resetAuto();
+      return;
+    }
+    auto.miss = 0;
+    const now = performance.now();
     if (!auto.prev || cornerDist(raw, auto.prev) > AUTO_MOVE_TICK || (auto.anchor && cornerDist(raw, auto.anchor) > AUTO_MOVE_TOTAL)) {
-      auto.stable = 0;
+      auto.since = now;
       auto.anchor = raw;
-    } else {
-      auto.stable++;
     }
     auto.prev = raw;
-    auto.armed = auto.stable > 0;
-    setArming(Math.min(1, auto.stable / AUTO_STABLE_TICKS));
-    if (auto.stable >= AUTO_STABLE_TICKS) {
+    const progress = Math.min(1, (now - auto.since) / AUTO_HOLD_MS);
+    auto.armed = progress > 0;
+    setArming(progress);
+    if (progress >= 1) {
       resetAuto();
       auto.waiting = true;
       auto.sig = signature();
@@ -406,24 +446,35 @@
   });
 
   // Live-Randerkennung im Kamerabild
-  const live = { timer: null, quad: null, miss: 0 };
+  const live = { timer: null, quad: null, miss: 0, on: false, cost: 0 };
   function startLive() {
     stopLive();
-    if (settings.autoCrop) live.timer = setInterval(liveTick, 250);
+    if (!settings.autoCrop) return;
+    live.on = true;
+    live.timer = setTimeout(liveTick, 100);
   }
   function stopLive() {
     resetAuto();
     auto.waiting = false;
-    clearInterval(live.timer);
+    live.on = false;
+    clearTimeout(live.timer);
     live.timer = null;
     live.quad = null;
     live.miss = 0;
     drawLive();
   }
   function liveTick() {
+    if (!live.on) return;
+    const t0 = performance.now();
+    try { liveStep(); } catch (e) { console.warn(e); }
+    // Takt an die Gerätegeschwindigkeit anpassen: höchstens ~40 % der Rechenzeit für die Live-Erkennung
+    live.cost = live.cost ? live.cost * 0.7 + (performance.now() - t0) * 0.3 : performance.now() - t0;
+    if (live.on) live.timer = setTimeout(liveTick, Math.max(150, Math.min(1000, live.cost * 1.5)));
+  }
+  function liveStep() {
     if (!video.videoWidth || cam.shooting || document.hidden) return;
     let q = null;
-    try { q = Img.detect(video, 160); } catch { q = null; }
+    try { q = Img.detect(video, 160, true); } catch { q = null; }
     if (q) {
       live.miss = 0;
       live.quad = live.quad ? live.quad.map((p, i) => [p[0] * 0.4 + q[i][0] * 0.6, p[1] * 0.4 + q[i][1] * 0.6]) : q;
@@ -634,16 +685,33 @@
     const flash = $('#camFlash');
     flash.classList.remove('on'); void flash.offsetWidth; flash.classList.add('on');
     if (navigator.vibrate) navigator.vibrate(15);
+    const hint = live.quad && live.quad.map((p) => p.slice());
+    const img = $('#camLast img');
+    const showThumb = (blob) => {
+      if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+      img.dataset.url = URL.createObjectURL(blob);
+      img.src = img.dataset.url;
+    };
     try {
-      const c = Img.draw(video, MAX_DIM);
-      const t = Img.draw(c, 160);
-      const img = $('#camLast img');
-      img.src = t.toDataURL('image/jpeg', 0.7);
-      Img.release(t);
       cam.added++;
       updateCamUi();
-      await addFromCanvas(c, live.quad && live.quad.map((p) => p.slice()));
-      Img.release(c);
+      await track((async () => {
+        // bevorzugt im Hintergrund-Thread (blockiert die Bedienung nicht)
+        const enc = await Proc.encodeFrame(video, MAX_DIM);
+        if (enc) {
+          showThumb(enc.thumb);
+          addOriginal(enc.original, hint);
+          return;
+        }
+        const c = Img.draw(video, MAX_DIM);
+        const t = Img.draw(c, 160);
+        const thumbBlob = Img.toBlob(t, 'image/jpeg', 0.7);
+        const original = await Img.toBlob(c, 'image/jpeg', 0.92);
+        Img.release(c);
+        showThumb(await thumbBlob);
+        Img.release(t);
+        addOriginal(original, hint);
+      })());
       updateCamUi();
     } catch (e) {
       console.error(e);
@@ -759,6 +827,7 @@
 
   function rotatePage(steps) {
     const p = editor.page;
+    p.autoDetect = false;
     for (let k = 0; k < ((steps % 4) + 4) % 4; k++) p.corners = Img.rotateCornersCW(p.corners);
     p.rotation = (((p.rotation + steps * 90) % 360) + 360) % 360;
     schedule(p);
@@ -934,6 +1003,7 @@
     if (!Img.isConvex(cr.corners)) { toast('Die Ecken bilden kein gültiges Viereck.'); return; }
     const p = editor.page;
     p.corners = cr.corners.map((x) => x.slice());
+    p.autoDetect = false;
     endCrop();
     schedule(p);
   });
@@ -1139,6 +1209,7 @@
 
   // ---------- Start ----------
   async function init() {
+    Proc.init();
     renderGrid();
     const recs = await DB.all();
     if (Array.isArray(recs) && recs.length) {
@@ -1166,5 +1237,5 @@
   init();
 
   // Für Tests
-  window.DokScan = { get pages() { return pages; }, whenIdle, addFiles, buildPdf, settings };
+  window.DokScan = { get pages() { return pages; }, whenIdle, addFiles, buildPdf, settings, workerReady: () => Proc.init() };
 })();
