@@ -1,13 +1,14 @@
 'use strict';
 // Offline-Cache für die App-Dateien (stale-while-revalidate).
-const CACHE = 'dokscan-v3';
+const CACHE = 'dokscan-v4';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'app.js', 'imaging.js', 'pdf.js',
   'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png',
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' umgeht den HTTP-Cache, damit wirklich die neue Version gespeichert wird
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
