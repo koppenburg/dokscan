@@ -39,6 +39,8 @@
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 17v4M17 19h4"/></symbol>
     <symbol id="i-full" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
     <symbol id="i-switch" viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><path d="M9 13a3 3 0 0 1 5.2-2"/><path d="M15 13a3 3 0 0 1-5.2 2"/><path d="M14.5 9v2.2h-2.2M9.5 17v-2.2h2.2"/></symbol>
+    <symbol id="i-text" viewBox="0 0 24 24"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   </defs>
 </svg>
@@ -142,6 +144,7 @@
       <button id="edRotL" class="tool" type="button"><svg class="ic"><use href="#i-rot-l"/></svg><span>Links</span></button>
       <button id="edCrop" class="tool" type="button"><svg class="ic"><use href="#i-crop"/></svg><span>Zuschnitt</span></button>
       <button id="edRotR" class="tool" type="button"><svg class="ic"><use href="#i-rot-r"/></svg><span>Rechts</span></button>
+      <button id="edText" class="tool" type="button"><svg class="ic"><use href="#i-text"/></svg><span>Text</span></button>
       <button id="edMoveNext" class="tool" type="button"><svg class="ic"><use href="#i-right"/></svg><span>Nach hinten</span></button>
     </div>
   </div>
@@ -183,6 +186,8 @@
       </div>
     </div>
 
+    <label class="switch"><input id="pdfOcr" type="checkbox"><span class="track"></span><span>Texterkennung<br><span class="muted small">PDF wird durchsuchbar, Text lässt sich markieren und kopieren</span></span></label>
+
     <div id="pdfProgress" class="progress" hidden>
       <div class="progress-bar"><span id="pdfProgressBar"></span></div>
       <p id="pdfProgressText" class="muted small">Seiten werden verarbeitet …</p>
@@ -205,6 +210,23 @@
   </form>
 </dialog>
 
+<!-- Erkannter Text -->
+<dialog id="textDialog" class="sheet-dialog" aria-labelledby="textTitle">
+  <form method="dialog" class="sheet-body">
+    <header class="sheet-head">
+      <h2 id="textTitle">Erkannter Text</h2>
+      <button class="icon-btn" value="close" aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+    </header>
+    <div id="textProgress" class="progress" hidden>
+      <div class="progress-bar"><span id="textProgressBar"></span></div>
+      <p id="textProgressText" class="muted small">Texterkennung wird geladen …</p>
+    </div>
+    <textarea id="textOut" class="text-out" rows="12" readonly placeholder="Kein Text erkannt."></textarea>
+    <p id="textError" class="error small" hidden></p>
+    <button id="textCopy" class="btn primary wide" type="button"><svg class="ic"><use href="#i-copy"/></svg>Text kopieren</button>
+  </form>
+</dialog>
+
 <!-- Einstellungen -->
 <dialog id="settingsDialog" class="sheet-dialog" aria-labelledby="setTitle">
   <form method="dialog" class="sheet-body">
@@ -219,6 +241,7 @@
     <label class="switch"><input id="setAutoCrop" type="checkbox"><span class="track"></span><span>Dokumentränder automatisch erkennen</span></label>
     <label class="switch"><input id="setAutoShoot" type="checkbox"><span class="track"></span><span>Automatisch auslösen<br><span class="muted small">Foto wird gemacht, sobald das Dokument ruhig erkannt ist</span></span></label>
     <label class="switch"><input id="setWideFov" type="checkbox"><span class="track"></span><span>Weites Sichtfeld<br><span class="muted small">Kamerabild ohne Zuschnitt (empfohlen für iPad), etwas geringere Auflösung</span></span></label>
+    <label class="switch"><input id="setOcr" type="checkbox"><span class="track"></span><span>Texterkennung (OCR)<br><span class="muted small">Text wird im Hintergrund erkannt, PDF wird durchsuchbar. Beim ersten Mal werden ca. 9 MB geladen.</span></span></label>
     <label class="switch"><input id="setAutoPdf" type="checkbox"><span class="track"></span><span>Nach dem Scannen automatisch PDF erstellen</span></label>
     <p class="muted small">Seiten werden nur lokal in diesem Browser gespeichert, bis du ein neues Dokument beginnst.</p>
     <button id="setClear" class="btn danger wide" type="button"><svg class="ic"><use href="#i-trash"/></svg>Alle Seiten löschen</button>
@@ -229,6 +252,7 @@
 
 <script src="pdf.js"></script>
 <script src="imaging.js"></script>
+<script src="ocr.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

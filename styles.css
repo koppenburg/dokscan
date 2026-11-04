@@ -257,6 +257,8 @@ main { flex: 1; overflow-y: auto; padding: 6px 16px 20px; -webkit-overflow-scrol
 .switch input:checked + .track::after { transform: translateX(18px); }
 .switch input:focus-visible + .track { outline: 3px solid var(--accent); outline-offset: 2px; }
 
+.text-out { width: 100%; min-height: 220px; max-height: 50vh; resize: vertical; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); color: var(--text); font: .92rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 12px; }
+
 /* ---------- Toast ---------- */
 .toast {
   position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 110px); z-index: 50;

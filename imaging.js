@@ -574,6 +574,36 @@ const Img = (() => {
   }
 
   /**
+   * Schneidet dunkle Reststreifen des Untergrunds an den Rändern ab (höchstens 2 % je Seite).
+   */
+  function trimEdges(c) {
+    const W = c.width, H = c.height;
+    if (W < 50 || H < 50) return c;
+    const x = ctx(c);
+    const lum = (d) => { let s = 0; for (let i = 0; i < d.length; i += 4) s += d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114; return s / (d.length / 4); };
+    const line = (side, k) => {
+      if (side === 0) return lum(x.getImageData(0, k, W, 1).data);           // oben
+      if (side === 1) return lum(x.getImageData(0, H - 1 - k, W, 1).data);   // unten
+      if (side === 2) return lum(x.getImageData(k, 0, 1, H).data);           // links
+      return lum(x.getImageData(W - 1 - k, 0, 1, H).data);                   // rechts
+    };
+    const cut = [0, 0, 0, 0];
+    for (let side = 0; side < 4; side++) {
+      const len = side < 2 ? H : W;
+      const max = Math.max(2, Math.round(len * 0.02));
+      const ref = line(side, max + 3);
+      let k = 0;
+      while (k < max && line(side, k) < ref * 0.82) k++;
+      cut[side] = k < max ? k : 0; // ganzer Bereich dunkel → eher Inhalt, nichts abschneiden
+    }
+    if (!cut.some(Boolean)) return c;
+    const nw = W - cut[2] - cut[3], nh = H - cut[0] - cut[1];
+    const out = canvas(nw, nh);
+    ctx(out).drawImage(c, cut[2], cut[0], nw, nh, 0, 0, nw, nh);
+    return out;
+  }
+
+  /**
    * Komplette Seitenverarbeitung (Hauptthread oder Worker):
    * Original laden → drehen → ggf. Ränder erkennen → entzerren → Filter → JPEG + Vorschaubild.
    */
@@ -589,6 +619,8 @@ const Img = (() => {
     if (!isFull(corners)) {
       const w = warp(c, corners, maxDim);
       release(c); c = w;
+      const t = trimEdges(c);
+      if (t !== c) { release(c); c = t; }
     }
     filter(c, mode);
     const processed = await toBlob(c, 'image/jpeg', 0.9);

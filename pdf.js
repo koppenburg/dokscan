@@ -54,8 +54,25 @@ const PDFWriter = (() => {
 
   const num = (n) => (Math.round(n * 100) / 100).toString();
 
+  // WinAnsiEncoding (Windows-1252) für die Standardschrift Helvetica – deckt Deutsch ab
+  const WIN_ANSI_EXTRA = { 0x20AC: 0x80, 0x201A: 0x82, 0x201E: 0x84, 0x2026: 0x85, 0x2018: 0x91, 0x2019: 0x92, 0x201C: 0x93, 0x201D: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97 };
+  function winAnsiHex(s) {
+    let hex = '';
+    for (const ch of String(s)) {
+      const cp = ch.codePointAt(0);
+      let b;
+      if ((cp >= 0x20 && cp <= 0x7E) || (cp >= 0xA0 && cp <= 0xFF)) b = cp;
+      else if (WIN_ANSI_EXTRA[cp]) b = WIN_ANSI_EXTRA[cp];
+      else b = 0x3F; // ?
+      hex += b.toString(16).padStart(2, '0');
+    }
+    return hex.toUpperCase();
+  }
+
   /**
-   * @param {Array<{jpeg:Uint8Array,pageWidth:number,pageHeight:number,x:number,y:number,w:number,h:number}>} pages  Maße in pt
+   * @param {Array<{jpeg:Uint8Array,pageWidth:number,pageHeight:number,x:number,y:number,w:number,h:number,
+   *   text?:Array<{s:string,x:number,y:number,size:number,scale:number}>}>} pages  Maße in pt;
+   *   text = unsichtbare Textebene (Grundlinie x/y, Schriftgröße, horizontale Skalierung in %)
    * @param {{title?:string, producer?:string}} meta
    * @returns {Blob}
    */
@@ -76,24 +93,36 @@ const PDFWriter = (() => {
     };
 
     const n = pages.length;
-    const total = 3 + 3 * n;
+    const total = 4 + 3 * n;
+    const first = 5; // erstes Seitenobjekt
     push('%PDF-1.4\n');
     push(new Uint8Array([0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A]));
 
     obj(1, ['<< /Type /Catalog /Pages 2 0 R >>']);
-    const kids = pages.map((_, i) => `${4 + 3 * i} 0 R`).join(' ');
+    const kids = pages.map((_, i) => `${first + 3 * i} 0 R`).join(' ');
     obj(2, [`<< /Type /Pages /Kids [${kids}] /Count ${n} >>`]);
     const now = pdfDate(new Date());
     obj(3, [`<< /Producer ${pdfText(meta.producer || 'DokScan')} /Creator ${pdfText(meta.producer || 'DokScan')} /Title ${pdfText(meta.title || 'Scan')} /CreationDate (${now}) /ModDate (${now}) >>`]);
 
+    obj(4, ['<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>']);
+
     pages.forEach((p, i) => {
-      const pageNo = 4 + 3 * i, contNo = 5 + 3 * i, imgNo = 6 + 3 * i;
+      const pageNo = first + 3 * i, contNo = first + 1 + 3 * i, imgNo = first + 2 + 3 * i;
       const info = jpegInfo(p.jpeg);
       obj(pageNo, [
         `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${num(p.pageWidth)} ${num(p.pageHeight)}] ` +
-        `/Resources << /XObject << /Im0 ${imgNo} 0 R >> /ProcSet [/PDF /ImageB /ImageC] >> /Contents ${contNo} 0 R >>`,
+        `/Resources << /XObject << /Im0 ${imgNo} 0 R >> /Font << /F1 4 0 R >> /ProcSet [/PDF /Text /ImageB /ImageC] >> /Contents ${contNo} 0 R >>`,
       ]);
-      const content = `q\n${num(p.w)} 0 0 ${num(p.h)} ${num(p.x)} ${num(p.y)} cm\n/Im0 Do\nQ`;
+      let content = `q\n${num(p.w)} 0 0 ${num(p.h)} ${num(p.x)} ${num(p.y)} cm\n/Im0 Do\nQ`;
+      if (p.text && p.text.length) {
+        // unsichtbarer Text (Render-Modus 3) exakt über den erkannten Wörtern
+        const parts = ['\nBT\n3 Tr'];
+        for (const t of p.text) {
+          parts.push(`/F1 ${num(t.size)} Tf ${num(t.scale)} Tz 1 0 0 1 ${num(t.x)} ${num(t.y)} Tm <${winAnsiHex(t.s)}> Tj`);
+        }
+        parts.push('ET');
+        content += parts.join('\n');
+      }
       obj(contNo, [`<< /Length ${content.length} >>\nstream\n`, content, '\nendstream']);
       const cs = info.components === 1 ? '/DeviceGray' : info.components === 4 ? '/DeviceCMYK' : '/DeviceRGB';
       obj(imgNo, [

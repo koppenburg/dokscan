@@ -17,7 +17,7 @@
 
   // ---------- Einstellungen ----------
   const IS_IPAD = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true };
+  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true };
   const settings = (() => {
     try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('dokscan.settings') || '{}') }; }
     catch { return { ...DEFAULTS }; }
@@ -67,7 +67,7 @@
   const record = (p, order) => ({
     id: p.id, order, created: p.created, original: p.original,
     rotation: p.rotation, corners: p.corners, filter: p.filter, autoDetect: !!(p.autoDetect && !p.processed),
-    processed: p.processed, pw: p.pw, ph: p.ph, thumb: p.thumb,
+    processed: p.processed, pw: p.pw, ph: p.ph, thumb: p.thumb, procKey: p.procKey, ocr: p.ocr,
   });
   const persist = (p) => { const i = pages.indexOf(p); if (i >= 0) DB.put(record(p, i)); };
   const persistAll = () => pages.forEach(persist);
@@ -121,7 +121,8 @@
       try {
         const result = await processPage(p);
         if (p.rev !== rev) continue; // wurde inzwischen geändert und neu eingereiht
-        Object.assign(p, result, { pending: false, error: false });
+        Object.assign(p, result, { pending: false, error: false, procKey: uid() });
+        if (settings.ocr) ensureOcr(p).catch(() => {}); // Text im Hintergrund erkennen
       } catch (e) {
         console.error(e);
         if (p.rev === rev) { p.pending = false; p.error = true; }
@@ -225,6 +226,52 @@
       }
     }
     return ok;
+  }
+
+  // ---------- Texterkennung ----------
+  /** Liefert den erkannten Text der aktuellen Seitenversion (aus Cache oder neu erkannt). */
+  function ensureOcr(p, onProgress) {
+    const key = p.procKey;
+    if (!p.processed || !key) return Promise.reject(new Error('Seite ist noch nicht fertig verarbeitet.'));
+    if (p.ocr && p.ocr.key === key) return Promise.resolve(p.ocr);
+    if (p.ocrJob && p.ocrJob.key === key) {
+      if (onProgress) p.ocrJob.listeners.add(onProgress);
+      return p.ocrJob.promise;
+    }
+    const listeners = new Set(onProgress ? [onProgress] : []);
+    const promise = Ocr.recognize(p.processed, (m) => listeners.forEach((f) => f(m))).then((res) => {
+      const ocr = { key, text: res.text, words: res.words };
+      if (p.procKey === key) { p.ocr = ocr; persist(p); }
+      return ocr;
+    }).finally(() => { if (p.ocrJob && p.ocrJob.key === key) p.ocrJob = null; });
+    p.ocrJob = { key, promise, listeners };
+    return promise;
+  }
+
+  function ocrStatus(m) {
+    const st = {
+      'loading tesseract core': 'Texterkennung wird geladen …',
+      'initializing tesseract': 'Texterkennung wird gestartet …',
+      'loading language traineddata': 'Sprachdaten werden geladen …',
+      'initializing api': 'Texterkennung wird gestartet …',
+      'recognizing text': 'Text wird erkannt …',
+    }[m && m.status] || 'Texterkennung …';
+    return { text: st, progress: m && typeof m.progress === 'number' ? m.progress : 0, recognizing: m && m.status === 'recognizing text' };
+  }
+
+  // Helvetica-Breiten über Arial messen (gleiche Laufweiten), um die Textebene passend zu skalieren
+  const measureCtx = document.createElement('canvas').getContext('2d');
+  measureCtx.font = '1000px Helvetica, Arial, sans-serif';
+  const emWidth = (s) => measureCtx.measureText(s).width / 1000 || 0.5 * s.length;
+
+  function textLayer(p, x, y, k) {
+    if (!p.ocr || !p.ocr.words) return [];
+    return p.ocr.words.map(([s, x0, y0, x1, y1, base, lineH]) => {
+      const size = Math.max(1, Math.min((lineH || (y1 - y0)) * k * 0.82, (y1 - y0) * k * 1.6));
+      const natural = emWidth(s) * size;
+      const scale = natural > 0 ? Math.max(10, Math.min(1000, 100 * ((x1 - x0) * k) / natural)) : 100;
+      return { s, x: x + x0 * k, y: y + (p.ph - base) * k, size, scale };
+    });
   }
 
   // ---------- Übersicht ----------
@@ -833,6 +880,44 @@
     schedule(p);
   }
 
+  // Erkannten Text anzeigen und kopieren
+  const textDialog = $('#textDialog');
+  async function showText() {
+    const p = editor.page;
+    if (!p) return;
+    const out = $('#textOut'), prog = $('#textProgress'), err = $('#textError');
+    out.value = '';
+    err.hidden = true;
+    $('#textCopy').disabled = true;
+    prog.hidden = false;
+    $('#textProgressBar').style.width = '0%';
+    $('#textProgressText').textContent = 'Seite wird vorbereitet …';
+    textDialog.showModal();
+    try {
+      if (p.pending) await whenIdle();
+      const ocr = await ensureOcr(p, (m) => {
+        const st = ocrStatus(m);
+        $('#textProgressText').textContent = st.text;
+        $('#textProgressBar').style.width = `${Math.round((st.recognizing ? st.progress : 0) * 100)}%`;
+      });
+      out.value = ocr.text;
+      $('#textCopy').disabled = !ocr.text;
+    } catch (e) {
+      console.error(e);
+      err.textContent = 'Texterkennung nicht möglich: ' + (e.message || e);
+      err.hidden = false;
+    } finally {
+      prog.hidden = true;
+    }
+  }
+  $('#edText').addEventListener('click', showText);
+  $('#textCopy').addEventListener('click', async () => {
+    const t = $('#textOut').value;
+    try { await navigator.clipboard.writeText(t); toast('Text kopiert.'); }
+    catch { $('#textOut').select(); document.execCommand('copy'); toast('Text kopiert.'); }
+  });
+  textDialog.addEventListener('click', (e) => { if (e.target === textDialog) textDialog.close(); });
+
   $('#edBack').addEventListener('click', closeScreen);
   $('#edMovePrev').addEventListener('click', () => movePage(-1));
   $('#edMoveNext').addEventListener('click', () => movePage(1));
@@ -1046,19 +1131,25 @@
     $('#pdfName').value = defaultName();
     setRadio('format', settings.format);
     setRadio('quality', settings.quality);
+    $('#pdfOcr').checked = settings.ocr;
     $('#pdfProgress').hidden = true;
     if (!pdfDialog.open) pdfDialog.showModal();
     if (auto) generatePdf();
   }
 
-  async function buildPdf(format, qualityKey, onProgress) {
+  async function buildPdf(format, qualityKey, onProgress, withOcr = false) {
     const preset = QUALITY[qualityKey] || QUALITY.medium;
     const out = [];
+    let ocrFailed = false;
     for (let i = 0; i < pages.length; i++) {
       const p = pages[i];
       onProgress(i, pages.length);
       await tick();
       if (!p.processed) throw new Error(`Seite ${i + 1} konnte nicht verarbeitet werden.`);
+      if (withOcr && !ocrFailed) {
+        try { await ensureOcr(p, (m) => onProgress(i, pages.length, ocrStatus(m))); }
+        catch (e) { console.warn(e); ocrFailed = true; }
+      }
       let blob = p.processed, w = p.pw, h = p.ph;
       if (Math.max(w, h) > preset.dim || preset.q < 0.9) {
         const img = await Img.load(p.processed);
@@ -1079,10 +1170,14 @@
       }
       const s = Math.min(pageW / w, pageH / h);
       const iw = w * s, ih = h * s;
-      out.push({ jpeg, pageWidth: pageW, pageHeight: pageH, x: (pageW - iw) / 2, y: (pageH - ih) / 2, w: iw, h: ih });
+      const x = (pageW - iw) / 2, y = (pageH - ih) / 2;
+      const text = withOcr && p.ocr && p.ocr.key === p.procKey ? textLayer(p, x, y, iw / p.pw) : null;
+      out.push({ jpeg, pageWidth: pageW, pageHeight: pageH, x, y, w: iw, h: ih, text });
     }
     onProgress(pages.length, pages.length);
-    return PDFWriter.build(out, { title: fileName().replace(/\.pdf$/, ''), producer: 'DokScan' });
+    const blob = PDFWriter.build(out, { title: fileName().replace(/\.pdf$/, ''), producer: 'DokScan' });
+    blob.ocrFailed = ocrFailed;
+    return blob;
   }
 
   async function generatePdf() {
@@ -1091,6 +1186,7 @@
     resetPdfResult();
     settings.format = getRadio('format') || 'a4';
     settings.quality = getRadio('quality') || 'medium';
+    settings.ocr = $('#pdfOcr').checked;
     saveSettings();
     $('#pdfGenerate').disabled = true;
     $('#pdfProgress').hidden = false;
@@ -1102,14 +1198,18 @@
         text.textContent = 'Seiten werden noch bearbeitet …';
         await whenIdle();
       }
-      const blob = await buildPdf(settings.format, settings.quality, (i, n) => {
-        bar.style.width = `${Math.round((i / n) * 100)}%`;
-        text.textContent = i < n ? `Seite ${i + 1} von ${n} …` : 'PDF wird zusammengefügt …';
-      });
+      const blob = await buildPdf(settings.format, settings.quality, (i, n, ocr) => {
+        const part = ocr && ocr.recognizing ? ocr.progress : 0;
+        bar.style.width = `${Math.round(((i + part) / n) * 100)}%`;
+        if (ocr && !ocr.recognizing) text.textContent = ocr.text;
+        else if (ocr) text.textContent = `Texterkennung Seite ${i + 1} von ${n} …`;
+        else text.textContent = i < n ? `Seite ${i + 1} von ${n} …` : 'PDF wird zusammengefügt …';
+      }, settings.ocr);
       pdfState.blob = blob;
       pdfState.url = URL.createObjectURL(blob);
       $('#pdfResName').textContent = fileName();
-      $('#pdfResMeta').textContent = `${pages.length} ${pages.length === 1 ? 'Seite' : 'Seiten'} · ${fmtSize(blob.size)}`;
+      $('#pdfResMeta').textContent = `${pages.length} ${pages.length === 1 ? 'Seite' : 'Seiten'} · ${fmtSize(blob.size)}` +
+        (settings.ocr ? (blob.ocrFailed ? ' · ohne Texterkennung (nicht verfügbar)' : ' · durchsuchbar') : '');
       $('#pdfShare').hidden = !canShareFile(blob);
       $('#pdfResult').hidden = false;
       $('#pdfGenerate').hidden = true;
@@ -1134,7 +1234,7 @@
 
   $('#btnPdf').addEventListener('click', () => openPdf(false));
   $('#pdfGenerate').addEventListener('click', generatePdf);
-  pdfDialog.addEventListener('change', (e) => { if (e.target.type === 'radio' && pdfState.blob) resetPdfResult(); });
+  pdfDialog.addEventListener('change', (e) => { if ((e.target.type === 'radio' || e.target.id === 'pdfOcr') && pdfState.blob) resetPdfResult(); });
   $('#pdfName').addEventListener('input', () => { if (pdfState.blob) $('#pdfResName').textContent = fileName(); });
   $('#pdfShare').addEventListener('click', async () => {
     const f = pdfFile(pdfState.blob);
@@ -1166,6 +1266,7 @@
     $('#setAutoPdf').checked = settings.autoPdf;
     $('#setWideFov').checked = settings.wideFov;
     $('#setAutoShoot').checked = settings.autoShoot;
+    $('#setOcr').checked = settings.ocr;
     $('#setClear').disabled = pages.length === 0;
     setDialog.showModal();
   });
@@ -1173,6 +1274,11 @@
   $('#setAutoPdf').addEventListener('change', (e) => { settings.autoPdf = e.target.checked; saveSettings(); });
   $('#setWideFov').addEventListener('change', (e) => { settings.wideFov = e.target.checked; saveSettings(); });
   $('#setAutoShoot').addEventListener('change', (e) => { settings.autoShoot = e.target.checked; saveSettings(); });
+  $('#setOcr').addEventListener('change', (e) => {
+    settings.ocr = e.target.checked;
+    saveSettings();
+    if (settings.ocr) pages.forEach((p) => { if (p.processed) ensureOcr(p).catch(() => {}); });
+  });
   setDialog.addEventListener('click', (e) => { if (e.target === setDialog) setDialog.close(); });
 
   async function clearAll() {
@@ -1225,7 +1331,7 @@
       navigator.serviceWorker.addEventListener('controllerchange', () => {
         if (!hadController || reloading) return;
         const tryReload = () => {
-          if (screen || pdfDialog.open || setDialog.open || !isIdle()) { setTimeout(tryReload, 2000); return; }
+          if (screen || pdfDialog.open || setDialog.open || textDialog.open || !isIdle()) { setTimeout(tryReload, 2000); return; }
           reloading = true;
           location.reload();
         };
@@ -1237,5 +1343,5 @@
   init();
 
   // Für Tests
-  window.DokScan = { get pages() { return pages; }, whenIdle, addFiles, buildPdf, settings, workerReady: () => Proc.init() };
+  window.DokScan = { get pages() { return pages; }, whenIdle, addFiles, buildPdf, settings, workerReady: () => Proc.init(), ensureOcr };
 })();
