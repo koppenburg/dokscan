@@ -148,6 +148,7 @@
   <header class="topbar ed-top">
     <button id="edBack" class="icon-btn" type="button" aria-label="Zurück"><svg class="ic"><use href="#i-left"/></svg></button>
     <h2 id="edTitle">Seite 1</h2>
+    <button id="edRetake" class="pill-btn" type="button" title="Seite neu aufnehmen"><svg class="ic"><use href="#i-camera"/></svg><span>Neu aufnehmen</span></button>
     <button id="edDelete" class="icon-btn danger" type="button" aria-label="Seite löschen" title="Seite löschen"><svg class="ic"><use href="#i-trash"/></svg></button>
   </header>
   <div id="edStage" class="ed-stage">
@@ -308,7 +309,7 @@
   </form>
 </dialog>
 
-<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"><span id="toastText"></span><button id="toastAction" class="toast-action" type="button" hidden></button></div>
 
 <script src="pdf.js"></script>
 <script src="imaging.js"></script>

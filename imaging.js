@@ -229,7 +229,26 @@ const Img = (() => {
     }
     return dst;
   }
-  const blur = (a, w, h, r) => pass(pass(a, w, h, r, true, 'avg'), w, h, r, false, 'avg');
+  /** Box-Weichzeichner mit laufender Summe (Aufwand unabhängig vom Radius); Ränder wie zuvor normiert. */
+  function boxPass(src, w, h, r, horiz) {
+    const dst = new Float32Array(w * h);
+    const len = horiz ? w : h, lines = horiz ? h : w;
+    const step = horiz ? 1 : w, lineStep = horiz ? w : 1;
+    for (let l = 0; l < lines; l++) {
+      const base = l * lineStep;
+      let acc = 0;
+      for (let k = 0; k <= Math.min(r, len - 1); k++) acc += src[base + k * step];
+      for (let i = 0; i < len; i++) {
+        const lo = i - r, hi = i + r;
+        const cnt = Math.min(hi, len - 1) - Math.max(lo, 0) + 1;
+        dst[base + i * step] = acc / cnt;
+        if (hi + 1 < len) acc += src[base + (hi + 1) * step];
+        if (lo >= 0) acc -= src[base + lo * step];
+      }
+    }
+    return dst;
+  }
+  const blur = (a, w, h, r) => boxPass(boxPass(a, w, h, r, true), w, h, r, false);
   const dilate = (a, w, h, r) => pass(pass(a, w, h, r, true, 'max'), w, h, r, false, 'max');
 
   /** Schätzt die Papierfarbe (Hintergrund) pro Pixel, um Schatten und ungleichmäßiges Licht auszugleichen. */
@@ -497,53 +516,447 @@ const Img = (() => {
     if (onBorder >= 2) return null;
     const areaFrac = quadArea / n;
     const score = fill * fit * (0.5 + 0.5 * Math.min(1, areaFrac / 0.8)) - onBorder * 0.1;
-    return { quad: q, score };
+    return { quad: q, score, raw: refined };
+  }
+
+  // ---------- Kantenbasierte Dokumenterkennung ----------
+
+  /** Farbkanäle glätten und Farbgradienten (stärkster Kanal je Pixel) berechnen. */
+  function prepareEdges(d, w, h) {
+    const n = w * h;
+    const R = new Float32Array(n), G = new Float32Array(n), B = new Float32Array(n);
+    for (let i = 0; i < n; i++) { R[i] = d[i * 4]; G[i] = d[i * 4 + 1]; B[i] = d[i * 4 + 2]; }
+    const ch = [blur(R, w, h, 1), blur(G, w, h, 1), blur(B, w, h, 1)];
+    const gx = new Float32Array(n), gy = new Float32Array(n), mag = new Float32Array(n);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        let bx = 0, by = 0, bm = -1;
+        for (let k = 0; k < 3; k++) {
+          const c = ch[k];
+          const sx = (c[i - w + 1] + 2 * c[i + 1] + c[i + w + 1] - c[i - w - 1] - 2 * c[i - 1] - c[i + w - 1]) / 8;
+          const sy = (c[i + w - 1] + 2 * c[i + w] + c[i + w + 1] - c[i - w - 1] - 2 * c[i - w] - c[i - w + 1]) / 8;
+          const m = sx * sx + sy * sy;
+          if (m > bm) { bm = m; bx = sx; by = sy; }
+        }
+        gx[i] = bx; gy[i] = by; mag[i] = Math.sqrt(bm);
+      }
+    }
+    // Schwelle für „Kante“: robust gegen Rauschen und Textur
+    // 80. Perzentil der Gradientenstärke über ein Histogramm (schneller als Sortieren)
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) hist[Math.min(255, mag[i] | 0)]++;
+    let acc = 0, p80 = 0;
+    for (; p80 < 255; p80++) { acc += hist[p80]; if (acc >= n * 0.8) break; }
+    const thr = Math.max(4, (p80 + 0.5) * 1.2);
+    const lum = new Float32Array(n);
+    for (let i = 0; i < n; i++) lum[i] = 0.3 * ch[0][i] + 0.59 * ch[1][i] + 0.11 * ch[2][i];
+    return { w, h, ch, lum, gx, gy, mag, thr };
+  }
+
+  /** Hough-Transformation mit Gradientenrichtung → stärkste Geraden [theta, rho, Stärke]. */
+  function houghLines(P, maxLines = 48) {
+    const { w, h, gx, gy, mag, thr, ch } = P;
+    // Farbe an einer Stelle (gerundet, im Bild begrenzt)
+    const colAt = (x, y) => { const xi = Math.max(0, Math.min(w - 1, Math.round(x))), yi = Math.max(0, Math.min(h - 1, Math.round(y))); const k = yi * w + xi; return [ch[0][k], ch[1][k], ch[2][k]]; };
+    const NT = 120, dT = Math.PI / NT;
+    const diag = Math.ceil(Math.hypot(w, h));
+    const NR = 2 * diag + 1;
+    const acc = new Float32Array(NT * NR);
+    const cosT = new Float32Array(NT), sinT = new Float32Array(NT);
+    for (let t = 0; t < NT; t++) { cosT[t] = Math.cos(t * dT); sinT[t] = Math.sin(t * dT); }
+    const SPREAD = 5;
+    for (let y = 2; y < h - 2; y++) {
+      for (let x = 2; x < w - 2; x++) {
+        const i = y * w + x;
+        const m = mag[i];
+        if (m < thr) continue;
+        // Nur Stufenkanten: beidseits 3 px quer zur Kante muss sich die Farbe deutlich unterscheiden.
+        // Dünne Linien (Textzeilen, Fugen, Maserung) haben beidseits dieselbe Farbe.
+        const ux = gx[i] / m, uy = gy[i] / m;
+        const c1 = colAt(x + ux * 3, y + uy * 3), c2 = colAt(x - ux * 3, y - uy * 3);
+        if (Math.hypot(c1[0] - c2[0], c1[1] - c2[1], c1[2] - c2[2]) < Math.max(8, thr)) continue;
+        // Gewicht nach Länge statt Kontrast: schwache, lange Blattkanten (heller Tisch) sollen gegen
+        // kontrastreiche, aber kurze Textzeilen bestehen
+        const wgt = Math.min(m, thr * 2);
+        let th = Math.atan2(gy[i], gx[i]);
+        if (th < 0) th += Math.PI;
+        const tb = Math.round(th / dT);
+        for (let k = -SPREAD; k <= SPREAD; k++) {
+          let t = tb + k;
+          if (t < 0) t += NT; else if (t >= NT) t -= NT;
+          const rho = x * cosT[t] + y * sinT[t];
+          acc[t * NR + Math.round(rho) + diag] += wgt * (1 - Math.abs(k) / (SPREAD + 1));
+        }
+      }
+    }
+    let max = 0;
+    for (let i = 0; i < acc.length; i++) if (acc[i] > max) max = acc[i];
+    if (!max) return [];
+    const cand = [];
+    const lim = max * 0.08;
+    for (let t = 0; t < NT; t++) {
+      for (let r = 0; r < NR; r++) {
+        const v = acc[t * NR + r];
+        if (v < lim) continue;
+        let isMax = true;
+        for (let dt = -3; dt <= 3 && isMax; dt++) {
+          let tt = t + dt, rr0 = r;
+          if (tt < 0) { tt += NT; rr0 = NR - 1 - r; } else if (tt >= NT) { tt -= NT; rr0 = NR - 1 - r; }
+          for (let dr = -6; dr <= 6; dr++) {
+            const rr = rr0 + dr;
+            if (rr < 0 || rr >= NR || (dt === 0 && dr === 0)) continue;
+            if (acc[tt * NR + rr] > v) { isMax = false; break; }
+          }
+        }
+        if (isMax) cand.push([t * dT, r - diag, v]);
+      }
+    }
+    cand.sort((a, b) => b[2] - a[2]);
+    return cand.slice(0, maxLines);
+  }
+
+  function intersect(l1, l2) {
+    const c1 = Math.cos(l1[0]), s1 = Math.sin(l1[0]), c2 = Math.cos(l2[0]), s2 = Math.sin(l2[0]);
+    const det = c1 * s2 - s1 * c2;
+    if (Math.abs(det) < 1e-6) return null;
+    return [(l1[1] * s2 - s1 * l2[1]) / det, (c1 * l2[1] - l1[1] * c2) / det];
+  }
+
+  /** Aus den Geraden Vierecke bilden: zwei annähernd parallele Paare, die sich schneiden. */
+  function lineQuads(P, lines) {
+    const { w, h } = P;
+    const minSide = Math.min(w, h);
+    const pairs = [];
+    for (let i = 0; i < lines.length; i++) {
+      for (let j = i + 1; j < lines.length; j++) {
+        const a = lines[i], b = lines[j];
+        let dth = Math.abs(a[0] - b[0]);
+        let rb = b[1];
+        if (dth > Math.PI / 2) { dth = Math.PI - dth; rb = -rb; }
+        if (dth > 0.42) continue;                         // ≤ ~24° Abweichung (Perspektive)
+        if (Math.abs(a[1] - rb) < minSide * 0.18) continue; // Abstand der Seiten
+        let mt = (a[0] + (Math.abs(a[0] - b[0]) > Math.PI / 2 ? (b[0] < a[0] ? b[0] + Math.PI : b[0] - Math.PI) : b[0])) / 2;
+        pairs.push({ a, b, mt, s: a[2] + b[2] });
+      }
+    }
+    // Je Richtung (15°-Bereiche) nur die stärksten Paare – sonst verdrängen viele parallele
+    // Textzeilen die senkrechten Blattkanten
+    pairs.sort((x, y) => y.s - x.s);
+    const perBucket = new Map();
+    const P2 = [];
+    for (const pr of pairs) {
+      const bkt = Math.floor((((pr.mt % Math.PI) + Math.PI) % Math.PI) / (Math.PI / 12));
+      const c = perBucket.get(bkt) || 0;
+      if (c >= 16) continue;
+      perBucket.set(bkt, c + 1);
+      P2.push(pr);
+    }
+    const quads = [];
+    for (let i = 0; i < P2.length; i++) {
+      for (let j = i + 1; j < P2.length; j++) {
+        const A = P2[i], B = P2[j];
+        if (Math.abs(Math.sin(A.mt - B.mt)) < 0.75) continue; // grob rechtwinklig (50–130°)
+        const pts = [intersect(A.a, B.a), intersect(A.a, B.b), intersect(A.b, B.b), intersect(A.b, B.a)];
+        if (pts.some((p) => !p || p[0] < -0.06 * w || p[0] > 1.06 * w || p[1] < -0.06 * h || p[1] > 1.06 * h)) continue;
+        const q = orderCorners(pts);
+        const ar = polyArea(q);
+        if (ar < 0.08 * w * h) continue;
+        if (!isConvex(q.map(([x, y]) => [x / w, y / h]))) continue;
+        q.strength = A.s + B.s;
+        quads.push(q);
+      }
+    }
+    return quads;
+  }
+
+  /**
+   * Bewertet ein Viereck (Pixelkoordinaten): Wie durchgehend liegen alle vier Seiten auf einer Kante,
+   * und wie deutlich unterscheidet sich die Farbe innen und außen?
+   */
+  /** Kantenunterstützung und Farbkontrast einer Seite a→b (Normale nach außen bei Uhrzeigersinn). */
+  function sideMetrics(P, a, b) {
+    const { w, h, ch, gx, gy, mag, thr } = P;
+    const at = (c, x, y) => c[(y | 0) * w + (x | 0)];
+    const inside = (x, y) => x >= 1 && y >= 1 && x < w - 1 && y < h - 1;
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (len < 8) return null;
+    const ux = (b[0] - a[0]) / len, uy = (b[1] - a[1]) / len;
+    const nx = uy, ny = -ux;
+    const K = P.fast ? Math.max(10, Math.min(18, Math.round(len / 6))) : Math.max(12, Math.min(40, Math.round(len / 4)));
+    let hit = 0, valid = 0, inL = 0, outL = 0, nL = 0;
+    const diffs = [];
+    const bandIn = [0, 0, 0], bandOut = [0, 0, 0];
+    let nBand = 0;
+    for (let k = 0; k < K; k++) {
+      const t = 0.08 + 0.84 * k / (K - 1);
+      const px = a[0] + (b[0] - a[0]) * t, py = a[1] + (b[1] - a[1]) * t;
+      if (!inside(px, py)) continue;
+      valid++;
+      let best = 0;
+      for (const o of [-1.5, -0.75, 0, 0.75, 1.5]) {
+        const x = px + nx * o, y = py + ny * o;
+        if (!inside(x, y)) continue;
+        const i = (y | 0) * w + (x | 0);
+        const gn = Math.abs(gx[i] * nx + gy[i] * ny);
+        if (gn > best && gn > 0.8 * mag[i]) best = gn;
+      }
+      if (best > thr) hit++;
+      // Farbunterschied innen/außen in drei Abständen; der kleinste zählt. Ein echter Rand bleibt
+      // überall verschieden, eine Seite neben einer Textzeile nur in einem Abstand.
+      let dmin = Infinity;
+      for (const o of [3, 6, 9]) {
+        const xi = px - nx * o, yi = py - ny * o, xo = px + nx * o, yo = py + ny * o;
+        if (!inside(xi, yi) || !inside(xo, yo)) { dmin = -1; break; }
+        const dr = at(ch[0], xi, yi) - at(ch[0], xo, yo), dg = at(ch[1], xi, yi) - at(ch[1], xo, yo), db = at(ch[2], xi, yi) - at(ch[2], xo, yo);
+        dmin = Math.min(dmin, Math.sqrt(dr * dr + dg * dg + db * db));
+        if (o === 3) { inL += at(ch[1], xi, yi); outL += at(ch[1], xo, yo); nL++; }
+        for (let k = 0; k < 3; k++) { bandIn[k] += at(ch[k], xi, yi); bandOut[k] += at(ch[k], xo, yo); }
+        nBand++;
+      }
+      if (dmin >= 0) diffs.push(dmin);
+    }
+    if (valid < K * 0.5) return null;
+    diffs.sort((x, y) => x - y);
+    const pointCon = diffs.length ? 1 - Math.exp(-diffs[Math.floor(diffs.length / 2)] / 22) : 0;
+    // Durchschnittsfarbe der Streifen innen/außen: mittelt Textzeilen heraus
+    const band = nBand ? Math.hypot(bandIn[0] - bandOut[0], bandIn[1] - bandOut[1], bandIn[2] - bandOut[2]) / nBand : 0;
+    const bandCon = 1 - Math.exp(-band / 16);
+    return { sup: hit / valid, con: Math.min(pointCon, bandCon), inL, outL, nL };
+  }
+
+  function scoreQuad(P, q) {
+    const { w, h } = P;
+    const sup = [], con = [];
+    let inL = 0, outL = 0, nL = 0;
+    for (let s = 0; s < 4; s++) {
+      const m = sideMetrics(P, q[s], q[(s + 1) % 4]);
+      if (!m) return { s: 0, minSup: 0, minCon: 0 };
+      sup.push(m.sup); con.push(m.con);
+      inL += m.inL; outL += m.outL; nL += m.nL;
+    }
+    const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+    let score = 0.35 * mean(sup) + 0.25 * Math.min(...sup) + 0.25 * mean(con) + 0.15 * Math.min(...con);
+    score += 0.12 * Math.min(1, polyArea(q) / (w * h));
+    if (nL && inL / nL > outL / nL + 6) score += 0.04; // Papier meist heller als der Untergrund
+    return { s: score, minSup: Math.min(...sup), minCon: Math.min(...con) };
+  }
+
+  /** Mittlere Farbe und Helligkeitsstreuung in einem Vierecksbereich (Stichproben). */
+  function regionStats(P, poly) {
+    const { w, h, ch } = P;
+    let r = 0, g = 0, b = 0, l2 = 0, n = 0;
+    const [a, bb, c, d] = poly;
+    for (let i = 1; i < 12; i++) {
+      for (let j = 1; j < 12; j++) {
+        const u = i / 12, v = j / 12;
+        // bilineare Interpolation im Viereck
+        const x = (1 - v) * ((1 - u) * a[0] + u * bb[0]) + v * ((1 - u) * d[0] + u * c[0]);
+        const y = (1 - v) * ((1 - u) * a[1] + u * bb[1]) + v * ((1 - u) * d[1] + u * c[1]);
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        const k = (y | 0) * w + (x | 0);
+        const R = ch[0][k], G = ch[1][k], B = ch[2][k];
+        r += R; g += G; b += B; l2 += (0.3 * R + 0.59 * G + 0.11 * B) ** 2; n++;
+      }
+    }
+    if (!n) return null;
+    r /= n; g /= n; b /= n;
+    const lm = 0.3 * r + 0.59 * g + 0.11 * b;
+    return { r, g, b, sd: Math.sqrt(Math.max(0, l2 / n - lm * lm)) };
+  }
+  const statDist = (s1, s2) => Math.hypot(s1.r - s2.r, s1.g - s2.g, s1.b - s2.b) + Math.abs(s1.sd - s2.sd);
+
+  /**
+   * Schiebt Seiten nach außen, wenn dort eine weitere parallele Kante liegt und der Streifen dazwischen
+   * noch zum Blatt gehört (Text, Kopfzeile) – während dahinter Untergrund kommt.
+   * Behebt den typischen Fehler, dass eine Textzeile statt des schwachen Blattrands gewählt wird.
+   */
+  function expandSides(P, q, lines) {
+    const eSup = CFG.eSup, eCon = CFG.eCon;
+    const lineOf = (a, b) => { const th = Math.atan2(b[1] - a[1], b[0] - a[0]) + Math.PI / 2; return [th, a[0] * Math.cos(th) + a[1] * Math.sin(th)]; };
+    let quad = q.map((p) => p.slice());
+    for (let pass = 0; pass < 3; pass++) {
+      const insideStats = regionStats(P, quad);
+      let changed = false;
+      for (let s = 0; s < 4; s++) {
+        const a = quad[s], b = quad[(s + 1) % 4];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        const ux = (b[0] - a[0]) / len, uy = (b[1] - a[1]) / len;
+        const nx = uy, ny = -ux; // nach außen
+        const prevL = lineOf(quad[(s + 3) % 4], quad[s]), nextL = lineOf(b, quad[(s + 2) % 4]);
+        // Ausdehnung des Vierecks senkrecht zu dieser Seite
+        const depth = Math.max(...quad.map((p) => Math.abs((p[0] - a[0]) * nx + (p[1] - a[1]) * ny)));
+        // Kandidaten: parallele (leicht gekippte) Geraden weiter außen, auf denen eine Kante liegt
+        const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+        const baseAng = Math.atan2(uy, ux);
+        const options = [];
+        const maxDist = depth * 1.4;
+        for (let dist = 4; dist <= maxDist; dist += 1.5) {
+          let bestOpt = null;
+          for (const tilt of [-0.07, -0.035, 0, 0.035, 0.07]) {
+            const ang = baseAng + tilt;
+            const th = ang + Math.PI / 2;
+            const cx = mx + nx * dist, cy = my + ny * dist;
+            const L = [th, cx * Math.cos(th) + cy * Math.sin(th)];
+            const p1 = intersect(prevL, L), p2 = intersect(L, nextL);
+            if (!p1 || !p2) continue;
+            const m = sideMetrics(P, p1, p2);
+            if (!m || m.sup < eSup || m.con < eCon) continue;
+            const v = m.sup + m.con * 0.5;
+            if (!bestOpt || v > bestOpt.v) bestOpt = { L, dist, v };
+          }
+          if (bestOpt) options.push(bestOpt);
+        }
+        for (const L of lines) {
+          const c = Math.cos(L[0]), sn = Math.sin(L[0]);
+          if (Math.abs(c * ux + sn * uy) > 0.2) continue; // nicht parallel genug
+          const sgn = c * nx + sn * ny > 0 ? 1 : -1;
+          const dist = sgn * (L[1] - (mx * c + my * sn));
+          if (dist < 5 || dist > maxDist) continue;
+          options.push({ L, dist, v: 0 });
+        }
+        options.sort((x, y) => x.dist - y.dist);
+        for (const { L, dist } of options) {
+          const p1 = intersect(prevL, L), p2 = intersect(L, nextL);
+          if (!p1 || !p2) continue;
+          const cand = quad.map((p) => p.slice());
+          cand[s] = p1; cand[(s + 1) % 4] = p2;
+          if (!isConvex(cand.map(([x, y]) => [x / P.w, y / P.h]))) continue;
+          const ms = sideMetrics(P, p1, p2);
+          if (!ms || ms.sup < eSup || ms.con < eCon) continue; // neue Seite muss eine echte Kante sein
+          const strip = regionStats(P, [a, b, p2, p1]);
+          const off = Math.min(12, dist * 0.6);
+          const beyond = regionStats(P, [p1, p2, [p2[0] + nx * off, p2[1] + ny * off], [p1[0] + nx * off, p1[1] + ny * off]]);
+          if (!strip || !beyond) continue;
+          const dBeyond = statDist(strip, beyond);
+          if (dBeyond < CFG.dBeyond) continue; // Streifen sieht aus wie Untergrund → hier endet das Blatt
+          // Breiter Streifen muss eher zum Blatt gehören als zum Bereich dahinter (z. B. nicht nur Schatten
+          // auf dem Tisch); ein schmaler darf farbig sein (Kopfzeile, Farbbalken)
+          if (dist > depth * CFG.narrow && insideStats && statDist(strip, insideStats) > dBeyond + 10) continue;
+          // schwache Kanten nur, wenn der Streifen eindeutig wie das Blattinnere aussieht
+          if ((ms.sup < CFG.strongSup || ms.con < CFG.strongCon) && !(insideStats && statDist(strip, insideStats) < CFG.weakInside)) continue;
+          quad = cand;
+          changed = true;
+          break;
+        }
+      }
+      if (!changed) break;
+    }
+    return quad;
+  }
+
+  /**
+   * Feinjustierung auf dem großen Bild: Jede Seite wird entlang ihrer Normalen auf den stärksten
+   * Farbsprung gesetzt, dann robust als Gerade neu angepasst.
+   */
+  function refineOnImage(qn, src) {
+    const [sw, sh] = sizeOf(src);
+    const big = draw(src, Math.min(1400, Math.max(sw, sh)));
+    const W = big.width, H = big.height;
+    const d = ctx(big).getImageData(0, 0, W, H).data;
+    release(big);
+    const px = (x, y, k) => { const xi = Math.max(0, Math.min(W - 1, x | 0)), yi = Math.max(0, Math.min(H - 1, y | 0)); return d[(yi * W + xi) * 4 + k]; };
+    const col = (x, y, ux, uy) => {
+      // Mittelwert aus drei Punkten entlang der Seite (glättet Rauschen)
+      let r = 0, g = 0, b = 0;
+      for (const o of [-2, 0, 2]) { const X = x + ux * o, Y = y + uy * o; r += px(X, Y, 0); g += px(X, Y, 1); b += px(X, Y, 2); }
+      return [r / 3, g / 3, b / 3];
+    };
+    const q = qn.map(([x, y]) => [x * W, y * H]);
+    const R = Math.max(6, Math.round(Math.max(W, H) * 0.012));
+    const lines = [];
+    for (let s = 0; s < 4; s++) {
+      const a = q[s], b = q[(s + 1) % 4];
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      const ux = (b[0] - a[0]) / len, uy = (b[1] - a[1]) / len;
+      const nx = uy, ny = -ux;
+      const pts = [];
+      const K = 48;
+      for (let k = 0; k < K; k++) {
+        const t = 0.06 + 0.88 * k / (K - 1);
+        const x0 = a[0] + (b[0] - a[0]) * t, y0 = a[1] + (b[1] - a[1]) * t;
+        let bestS = 0, bestD = -1;
+        for (let o = -R; o <= R; o++) {
+          const c1 = col(x0 + nx * (o - 1.5), y0 + ny * (o - 1.5), ux, uy), c2 = col(x0 + nx * (o + 1.5), y0 + ny * (o + 1.5), ux, uy);
+          const D = Math.hypot(c1[0] - c2[0], c1[1] - c2[1], c1[2] - c2[2]) * (1 - 0.25 * Math.abs(o) / R);
+          if (D > bestD) { bestD = D; bestS = o; }
+        }
+        if (bestD > 18) pts.push([x0 + nx * bestS, y0 + ny * bestS]);
+      }
+      if (pts.length < K * 0.35) return null;
+      let line = fitLine(pts);
+      // Ausreißer verwerfen und erneut anpassen
+      const res = pts.map((p) => Math.abs((p[0] - line.px) * line.ny - (p[1] - line.py) * line.nx));
+      const lim = [...res].sort((x, y) => x - y)[Math.floor(res.length * 0.75)];
+      line = fitLine(pts.filter((_, i) => res[i] <= lim + 0.5));
+      lines.push(line);
+    }
+    const out = [];
+    for (let i = 0; i < 4; i++) {
+      const L1 = lines[(i + 3) % 4], L2 = lines[i];
+      const det = L1.dx * L2.dy - L1.dy * L2.dx;
+      if (Math.abs(det) < 0.2) return null;
+      const t = ((L2.px - L1.px) * L2.dy - (L2.py - L1.py) * L2.dx) / det;
+      const x = L1.px + t * L1.dx, y = L1.py + t * L1.dy;
+      if (Math.hypot(x - q[i][0], y - q[i][1]) > 0.04 * Math.hypot(W, H)) return null;
+      out.push([Math.min(1, Math.max(0, x / W)), Math.min(1, Math.max(0, y / H))]);
+    }
+    return isConvex(out) ? out : null;
+  }
+
+  function fitLine(pts) {
+    let mx = 0, my = 0;
+    for (const [x, y] of pts) { mx += x; my += y; }
+    mx /= pts.length; my /= pts.length;
+    let xx = 0, xy = 0, yy = 0;
+    for (const [x, y] of pts) { xx += (x - mx) ** 2; xy += (x - mx) * (y - my); yy += (y - my) ** 2; }
+    const ang = 0.5 * Math.atan2(2 * xy, xx - yy);
+    const dx = Math.cos(ang), dy = Math.sin(ang);
+    return { px: mx, py: my, dx, dy, nx: -dy, ny: dx };
   }
 
   /**
    * Erkennt die Ränder eines Dokuments (Blatt Papier) im Bild.
-   * Prüft mehrere Merkmale (Helligkeit, „Papierweiß“) und Schwellwerte und nimmt das beste Viereck.
+   * Kandidaten aus Geradensuche (Hough) und Helligkeits-/Kantenmasken werden einheitlich bewertet
+   * (durchgehende Kanten auf allen vier Seiten + Farbunterschied innen/außen); das beste Viereck
+   * wird – außer in der Live-Vorschau – auf dem großen Bild exakt an die Kanten angepasst.
    * Gibt normalisierte Ecken zurück oder null, wenn nichts Sicheres gefunden wurde.
    */
-  function detect(src, size = 256, fast = false) {
+  function detect(src, size = 320, fast = false, prev = null) {
     const small = fast ? drawFast(src, size) : draw(src, size);
     const w = small.width, h = small.height, n = w * h;
     const d = (fast ? small.getContext('2d', { willReadFrequently: true }) : ctx(small)).getImageData(0, 0, w, h).data;
     if (!fast) release(small);
+    const P = prepareEdges(d, w, h);
+    P.fast = fast;
+    const lines = houghLines(P, fast ? 36 : 48);
+    let cands = lineQuads(P, lines);
+    if (fast && cands.length > 160) cands = cands.sort((a, b) => b.strength - a.strength).slice(0, 160);
+
+    // Zusätzliche Kandidaten aus Masken (helles Papier, „Papierweiß“, kantenfreier Hintergrund)
     const gray = new Float32Array(n), white = new Float32Array(n);
     for (let i = 0; i < n; i++) {
       const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
       gray[i] = 0.299 * r + 0.587 * g + 0.114 * b;
       const mn = Math.min(r, g, b), mxc = Math.max(r, g, b);
-      white[i] = mn - 0.5 * (mxc - mn); // hell UND farblos
+      white[i] = mn - 0.5 * (mxc - mn);
     }
-    let best = null;
     for (const raw of [gray, white]) {
       const f = blur(raw, w, h, 2);
       const { thr, hi } = otsu(f);
-      // zweite Stufe: trennt Papier vom hellen Untergrund, wenn die erste nur Schrift abgetrennt hat
       const upper = otsu(f, thr).thr;
-      const levels = [thr, thr + (hi - thr) * 0.4];
-      if (upper > thr + 4) levels.push(upper);
+      const levels = fast ? [thr] : [thr, thr + (hi - thr) * 0.4];
+      if (!fast && upper > thr + 4) levels.push(upper);
+      const mask = new Uint8Array(n);
       for (const t of levels) {
-        const mask = new Uint8Array(n);
         for (let i = 0; i < n; i++) mask[i] = f[i] > t ? 1 : 0;
         const c = quadFromMask(mask, w, h);
-        if (c && (!best || c.score > best.score)) best = c;
+        if (c) cands.push(c.raw);
       }
     }
-    // Kantenbasiert: alles, was vom Bildrand aus ohne Kante erreichbar ist, ist Hintergrund.
-    // Hilft bei hellem Untergrund, wo Helligkeits-Schwellwerte versagen.
     {
-      const f = blur(gray, w, h, 1);
       const edge = new Uint8Array(n);
-      for (let y = 1; y < h - 1; y++) {
-        for (let x = 1; x < w - 1; x++) {
-          const i = y * w + x;
-          const gx = (f[i + 1] - f[i - 1]) / 2, gy = (f[i + w] - f[i - w]) / 2;
-          if (gx * gx + gy * gy > 9) edge[i] = 1;
-        }
-      }
+      for (let i = 0; i < n; i++) if (P.mag[i] > P.thr) edge[i] = 1;
       const closed = dilate(edge, w, h, 1);
       const bg = new Uint8Array(n);
       const stack = new Int32Array(n);
@@ -561,17 +974,62 @@ const Img = (() => {
       }
       const mask = new Uint8Array(n);
       for (let i = 0; i < n; i++) mask[i] = bg[i] ? 0 : 1;
-      const c = quadFromMask(mask, w, h, 4);
-      if (c && (!best || c.score > best.score)) best = c;
+      const c = quadFromMask(mask, w, h, 0);
+      if (c) cands.push(c.raw);
     }
-    if (!best || best.score < 0.6) return null;
-    // minimal nach innen, damit kein Streifen Untergrund am Rand bleibt
-    const cx = best.quad.reduce((a, p) => a + p[0], 0) / 4, cy = best.quad.reduce((a, p) => a + p[1], 0) / 4;
-    const q = best.quad.map(([x, y]) => [x + (cx - x) * 0.012, y + (cy - y) * 0.012]);
-    // Fast das ganze Bild? Dann einfach das ganze Bild nehmen.
+
+    // Live: das zuletzt erkannte Viereck ist ebenfalls Kandidat, und Kandidaten in seiner Nähe
+    // bekommen einen Bonus – verhindert Springen zwischen fast gleich guten Lösungen
+    const prevPx = prev ? prev.map(([x, y]) => [x * w, y * h]) : null;
+    if (prevPx && isConvex(prev)) cands.push(prevPx);
+    const diag = Math.hypot(w, h);
+    let best = null, bestScore = 0, bestRaw = 0;
+    const scored = [];
+    for (const q of cands) {
+      const r = scoreQuad(P, q);
+      scored.push([q, r]);
+      let s = r.s;
+      if (prevPx && r.s >= CFG.acceptLive) {
+        const dmax = Math.max(...q.map((p, i) => Math.hypot(p[0] - prevPx[i][0], p[1] - prevPx[i][1]))) / diag;
+        s += 0.12 * Math.max(0, 1 - dmax / 0.04);
+      }
+      if (s > bestScore) { bestScore = s; best = q; bestRaw = r.s; }
+    }
+    if (prevPx) bestScore = bestRaw; // Schwelle auf der echten Bewertung prüfen
+    // optional: liegen gute Vierecke ineinander, das äußere nehmen
+    if (best && CFG.nested) {
+      const inPoly = (p, poly) => { let c = false; for (let i = 0, j = 3; i < 4; j = i++) { const a = poly[i], b = poly[j]; if ((a[1] > p[1]) !== (b[1] > p[1]) && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0]) c = !c; } return c; };
+      const tol = 0.02 * Math.hypot(w, h);
+      const contains = (outer, inner) => {
+        const cx = outer.reduce((s, p) => s + p[0], 0) / 4, cy = outer.reduce((s, p) => s + p[1], 0) / 4;
+        const grown = outer.map(([x, y]) => { const dx = x - cx, dy = y - cy, l = Math.hypot(dx, dy) || 1; return [x + dx / l * tol, y + dy / l * tol]; });
+        return inner.every((p) => inPoly(p, grown));
+      };
+      let area = polyArea(best);
+      for (const [q, r] of scored) {
+        if (r.s < DETECT_ACCEPT || r.s < bestScore * CFG.nestedRatio) continue;
+        const a = polyArea(q);
+        if (a > area * 1.04 && contains(q, best)) { best = q; area = a; }
+      }
+    }
+    detect.lastScore = bestScore;
+    // Mindestsicherheit (per Benchmark: richtige Treffer liegen darüber, viele Fehltreffer darunter)
+    if (!best || bestScore < (fast ? CFG.acceptLive : CFG.accept)) return null;
+    // Seiten nach außen schieben – nur auf dem Foto; in der verrauschten Live-Vorschau ließe es den Rahmen springen
+    if (!fast) { try { best = expandSides(P, best, lines); } catch (e) { /* unverändert lassen */ } }
+    let qn = best.map(([x, y]) => [Math.min(1, Math.max(0, x / w)), Math.min(1, Math.max(0, y / h))]);
+    if (!fast) {
+      try { qn = refineOnImage(qn, src) || qn; } catch (e) { /* grobe Lösung behalten */ }
+    }
+    // hauchdünn nach innen, damit kein Streifen Untergrund am Rand bleibt
+    const cx = qn.reduce((a, p) => a + p[0], 0) / 4, cy = qn.reduce((a, p) => a + p[1], 0) / 4;
+    const q = qn.map(([x, y]) => [x + (cx - x) * 0.004, y + (cy - y) * 0.004]);
     if (q.every((p, i) => Math.abs(p[0] - FULL[i][0]) < 0.02 && Math.abs(p[1] - FULL[i][1]) < 0.02)) return FULL.map((p) => p.slice());
     return q;
   }
+  const DETECT_ACCEPT = 0.5;
+  // Abgestimmte Schwellwerte der Erkennung (per Benchmark ermittelt)
+  const CFG = { accept: 0.87, acceptLive: 0.8, eSup: 0.35, eCon: 0.12, strongSup: 0.45, strongCon: 0.2, weakInside: 30, narrow: 0.2, dBeyond: 22, nested: 0, nestedRatio: 0.82 };
 
   /**
    * Schneidet dunkle Reststreifen des Untergrunds an den Rändern ab (höchstens 2 % je Seite).
@@ -634,5 +1092,8 @@ const Img = (() => {
   /** Zuletzt für die Live-Erkennung verkleinertes Kamerabild (oder null). */
   const lastFrame = () => fastCanvas;
 
-  return { FULL, canvas, release, load, draw, toBlob, lastFrame, rotate, rotateCornersCW, isFull, isConvex, warp, filter, detect, processPage };
+  // interne Bausteine für Tests
+  const _internals = { CFG, prepareEdges, houghLines, lineQuads, scoreQuad, sideMetrics, regionStats, statDist, expandSides, intersect };
+
+  return { _internals, FULL, canvas, release, load, draw, toBlob, lastFrame, rotate, rotateCornersCW, isFull, isConvex, warp, filter, detect, processPage };
 })();

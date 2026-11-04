@@ -299,7 +299,14 @@ main { flex: 1; overflow-y: auto; padding: 6px 16px 20px; -webkit-overflow-scrol
   max-width: calc(100% - 32px); width: max-content; text-align: center; box-shadow: 0 8px 24px rgba(0, 0, 0, .3);
   transition: opacity .2s, transform .2s;
 }
-.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.toast { display: flex; align-items: center; gap: 14px; }
+.toast-action { border: 0; background: transparent; color: #8fb4ff; font-weight: 700; padding: 4px 2px; }
+.pill-btn { display: inline-flex; align-items: center; gap: 6px; height: 38px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); font-size: .86rem; font-weight: 600; white-space: nowrap; }
+.pill-btn .ic { width: 18px; height: 18px; }
+.pill-btn:hover { background: var(--surface-2); }
+@media (max-width: 360px) { .pill-btn span { display: none; } .pill-btn { width: 44px; justify-content: center; padding: 0; } }
+.ed-top h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (min-width: 720px) {
   main { padding: 10px 28px 28px; }

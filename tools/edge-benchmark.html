@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Randerkennung – Benchmark</title>
+<style>
+  body { font: 15px/1.45 system-ui, sans-serif; margin: 24px; background: #f4f5f7; color: #14171c; }
+  table { border-collapse: collapse; margin-top: 12px; } td, th { padding: 4px 10px; border-bottom: 1px solid #dde1e7; text-align: left; }
+  .ok { color: #137333; } .bad { color: #c62828; }
+</style>
+</head>
+<body>
+<h1>Randerkennung – Benchmark</h1>
+<p>Erzeugt realistische Testszenen (Holz, Teppich, heller Tisch, Stoffmuster, Fliesen, dunkler Untergrund; Perspektive,
+Schatten, Rauschen, Unschärfe, JPEG) und misst, wie genau <code>Img.detect</code> die Blattecken findet.
+Korrekt = größte Eckenabweichung unter 2 % der Bilddiagonale.</p>
+<p id="status">Läuft …</p>
+<div id="out"></div>
+<script src="../imaging.js"></script>
+<script src="edge-scenes.js"></script>
+<script>
+  (async () => {
+    const out = document.getElementById('out');
+    for (const [name, from] of [['Szenen 1–60', 1], ['Szenen 61–120', 61]]) {
+      const res = await bench((c) => Img.detect(c), Array.from({ length: 60 }, (_, i) => i + from));
+      const ok = res.filter((x) => x.found && x.err < 2).length, bad = res.filter((x) => x.found && x.err >= 5).length, none = res.filter((x) => !x.found).length;
+      const errs = res.filter((x) => x.found).map((x) => x.err).sort((a, b) => a - b);
+      const kinds = {};
+      for (const x of res) { const k = (kinds[x.kind] = kinds[x.kind] || { n: 0, ok: 0 }); k.n++; if (x.found && x.err < 2) k.ok++; }
+      out.insertAdjacentHTML('beforeend', `<h2>${name}</h2><p><b class="ok">${ok}/60 korrekt</b> · <span class="bad">${bad} falsch</span> · ${none} nicht erkannt · Median-Abweichung ${errs.length ? errs[Math.floor(errs.length / 2)].toFixed(2) : '–'} %</p>
+        <table><tr><th>Untergrund</th><th>korrekt</th></tr>${Object.entries(kinds).map(([k, v]) => `<tr><td>${k}</td><td>${v.ok}/${v.n}</td></tr>`).join('')}</table>`);
+    }
+    document.getElementById('status').textContent = 'Fertig.';
+  })();
+</script>
+</body>
+</html>
