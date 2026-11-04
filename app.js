@@ -144,10 +144,10 @@
     return res;
   }
 
-  async function addFromCanvas(c) {
+  async function addFromCanvas(c, hint) {
     let corners = Img.FULL.map((x) => x.slice());
     if (settings.autoCrop) {
-      try { corners = Img.detect(c) || corners; } catch (e) { console.warn(e); }
+      try { corners = Img.detect(c) || hint || corners; } catch (e) { console.warn(e); }
     }
     const original = await Img.toBlob(c, 'image/jpeg', 0.92);
     const p = { id: uid(), created: Date.now(), original, rotation: 0, corners, filter: settings.filter, processed: null, thumb: null };
@@ -314,7 +314,47 @@
     $('#camDone').disabled = cam.added === 0;
     $('#camCount').textContent = String(cam.added);
     $('#camLast').hidden = cam.added === 0;
-    $('#camHint').textContent = `Seite ${pages.length + 1}`;
+    const page = `Seite ${pages.length + 1}`;
+    $('#camHint').textContent = !settings.autoCrop ? page : live.quad ? `${page} · Rand erkannt` : `${page} · Dokument suchen …`;
+  }
+
+  // Live-Randerkennung im Kamerabild
+  const live = { timer: null, quad: null, miss: 0 };
+  function startLive() {
+    stopLive();
+    if (settings.autoCrop) live.timer = setInterval(liveTick, 250);
+  }
+  function stopLive() {
+    clearInterval(live.timer);
+    live.timer = null;
+    live.quad = null;
+    live.miss = 0;
+    drawLive();
+  }
+  function liveTick() {
+    if (!video.videoWidth || cam.shooting || document.hidden) return;
+    let q = null;
+    try { q = Img.detect(video, 160); } catch { q = null; }
+    if (q) {
+      live.miss = 0;
+      live.quad = live.quad ? live.quad.map((p, i) => [p[0] * 0.4 + q[i][0] * 0.6, p[1] * 0.4 + q[i][1] * 0.6]) : q;
+    } else if (++live.miss > 3) {
+      live.quad = null;
+    }
+    drawLive();
+  }
+  function drawLive() {
+    const svg = $('#camQuad'), poly = $('#camQuadPoly');
+    const found = !!live.quad && !!video.videoWidth;
+    $('#camera').classList.toggle('doc-found', found);
+    updateCamUi();
+    if (!found) { poly.removeAttribute('points'); return; }
+    const r = svg.getBoundingClientRect();
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const s = Math.min(r.width / vw, r.height / vh);
+    const ox = (r.width - vw * s) / 2, oy = (r.height - vh * s) / 2;
+    svg.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
+    poly.setAttribute('points', live.quad.map(([x, y]) => `${(ox + x * vw * s).toFixed(1)},${(oy + y * vh * s).toFixed(1)}`).join(' '));
   }
 
   async function startStream() {
@@ -338,6 +378,7 @@
     video.srcObject = cam.stream;
     try { await video.play(); } catch { /* autoplay */ }
     setCamMsg('', false);
+    startLive();
     const caps = cam.track && cam.track.getCapabilities ? cam.track.getCapabilities() : {};
     $('#camTorch').hidden = !caps.torch;
     cam.torch = false;
@@ -345,6 +386,7 @@
   }
 
   function stopStream() {
+    stopLive();
     if (cam.stream) cam.stream.getTracks().forEach((t) => t.stop());
     cam.stream = null;
     cam.track = null;
@@ -384,7 +426,7 @@
       Img.release(t);
       cam.added++;
       updateCamUi();
-      await addFromCanvas(c);
+      await addFromCanvas(c, live.quad && live.quad.map((p) => p.slice()));
       Img.release(c);
       updateCamUi();
     } catch (e) {

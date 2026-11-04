@@ -131,6 +131,11 @@ main { flex: 1; overflow-y: auto; padding: 6px 16px 20px; -webkit-overflow-scrol
 .camera { background: #000; color: #fff; }
 .camera video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
 .cam-guide { position: absolute; inset: 14% 8%; border: 2px dashed rgba(255, 255, 255, .28); border-radius: 12px; pointer-events: none; }
+.cam-quad { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+#camQuadPoly { fill: rgba(91, 143, 255, .18); stroke: #5b8fff; stroke-width: 3; stroke-linejoin: round; }
+.cam-guide { transition: opacity .2s; }
+.camera.doc-found .cam-guide { opacity: 0; }
+.camera.doc-found .cam-pill { background: rgba(31, 95, 214, .85); }
 .cam-msg { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 32px; text-align: center; }
 .cam-msg p { max-width: 340px; margin: 0; color: rgba(255, 255, 255, .85); }
 .cam-top { position: absolute; left: 0; right: 0; top: 0; display: flex; justify-content: space-between; align-items: center; padding: calc(env(safe-area-inset-top) + 12px) 14px 12px; }
