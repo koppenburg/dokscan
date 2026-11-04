@@ -91,7 +91,14 @@
   const queue = [];
   let busy = false;
   let idleWaiters = [];
-  const whenIdle = () => (!busy && !queue.length ? Promise.resolve() : new Promise((r) => idleWaiters.push(r)));
+  const adding = new Set(); // Aufnahmen/Importe, die noch gespeichert werden
+  const isIdle = () => !busy && !queue.length && !adding.size;
+  async function whenIdle() {
+    while (!isIdle()) {
+      if (adding.size) await Promise.allSettled([...adding]);
+      if (busy || queue.length) await new Promise((r) => idleWaiters.push(r));
+    }
+  }
   const tick = () => new Promise((r) => setTimeout(r, 0));
 
   function schedule(p) {
@@ -145,7 +152,14 @@
     return res;
   }
 
-  async function addFromCanvas(c, hint) {
+  function addFromCanvas(c, hint) {
+    const job = addPage(c, hint);
+    adding.add(job);
+    job.finally(() => adding.delete(job)).catch(() => {});
+    return job;
+  }
+
+  async function addPage(c, hint) {
     let corners = Img.FULL.map((x) => x.slice());
     if (settings.autoCrop) {
       try { corners = Img.detect(c) || hint || corners; } catch (e) { console.warn(e); }
@@ -938,7 +952,7 @@
     const text = $('#pdfProgressText');
     bar.style.width = '0%';
     try {
-      if (busy || queue.length) {
+      if (!isIdle()) {
         text.textContent = 'Seiten werden noch bearbeitet …';
         await whenIdle();
       }
@@ -1056,6 +1070,18 @@
       pages.filter((p) => !p.processed || !p.thumb).forEach(schedule);
     }
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+      // Neue Version aktiv → neu laden, sobald nichts offen ist (Seiten sind gespeichert)
+      const hadController = !!navigator.serviceWorker.controller;
+      let reloading = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!hadController || reloading) return;
+        const tryReload = () => {
+          if (screen || pdfDialog.open || setDialog.open || !isIdle()) { setTimeout(tryReload, 2000); return; }
+          reloading = true;
+          location.reload();
+        };
+        tryReload();
+      });
       navigator.serviceWorker.register('sw.js').catch(() => {});
     }
   }
