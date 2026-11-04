@@ -208,7 +208,9 @@
     <div class="field">
       <span>Seitenformat</span>
       <div class="seg" id="pdfFormat">
-        <label><input type="radio" name="format" value="a4"><span>DIN A4</span></label>
+        <label><input type="radio" name="format" value="a4"><span>A4</span></label>
+        <label><input type="radio" name="format" value="a5"><span>A5</span></label>
+        <label><input type="radio" name="format" value="letter"><span>Letter</span></label>
         <label><input type="radio" name="format" value="image"><span>Wie Foto</span></label>
       </div>
     </div>
@@ -220,6 +222,39 @@
         <label><input type="radio" name="quality" value="low"><span>Klein</span></label>
       </div>
     </div>
+
+    <details id="pdfMore" class="more">
+      <summary><span>Weitere Einstellungen</span><span id="pdfMoreSummary" class="muted small"></span></summary>
+      <div class="more-body">
+        <div class="field" id="pdfOrientField">
+          <span>Ausrichtung</span>
+          <div class="seg">
+            <label><input type="radio" name="orient" value="auto"><span>Automatisch</span></label>
+            <label><input type="radio" name="orient" value="portrait"><span>Hoch</span></label>
+            <label><input type="radio" name="orient" value="landscape"><span>Quer</span></label>
+          </div>
+        </div>
+        <div class="field" id="pdfMarginField">
+          <span>Seitenrand</span>
+          <div class="seg">
+            <label><input type="radio" name="margin" value="0"><span>Ohne</span></label>
+            <label><input type="radio" name="margin" value="5"><span>5 mm</span></label>
+            <label><input type="radio" name="margin" value="10"><span>10 mm</span></label>
+            <label><input type="radio" name="margin" value="20"><span>20 mm</span></label>
+          </div>
+        </div>
+        <div class="field">
+          <span>Maximale Dateigröße</span>
+          <div class="seg">
+            <label><input type="radio" name="maxsize" value="0"><span>Keine</span></label>
+            <label><input type="radio" name="maxsize" value="1"><span>1 MB</span></label>
+            <label><input type="radio" name="maxsize" value="2"><span>2 MB</span></label>
+            <label><input type="radio" name="maxsize" value="5"><span>5 MB</span></label>
+          </div>
+          <span class="muted small">Für E-Mail: Bilder werden nur so weit verkleinert, wie nötig.</span>
+        </div>
+      </div>
+    </details>
 
     <label class="switch"><input id="pdfOcr" type="checkbox"><span class="track"></span><span>Texterkennung<br><span class="muted small">PDF wird durchsuchbar, Text lässt sich markieren und kopieren</span></span></label>
 

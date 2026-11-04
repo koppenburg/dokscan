@@ -28,6 +28,17 @@ self.onmessage = async (e) => {
       self.postMessage({ id, ok: true, result: { quad, sig } }, [sig.buffer]);
       return;
     }
+    if (job.type === 'reencode') {
+      // verarbeitete Seite für das PDF verkleinern/komprimieren
+      const img = await Img.load(job.blob);
+      const c = Img.draw(img, job.dim);
+      Img.release(img);
+      const blob = await Img.toBlob(c, 'image/jpeg', job.q);
+      const result = { blob, w: c.width, h: c.height };
+      Img.release(c);
+      self.postMessage({ id, ok: true, result });
+      return;
+    }
     if (job.type === 'encode') {
       // Kamerabild → Original-JPEG + kleines Vorschaubild
       const c = Img.draw(job.bitmap, job.maxDim);
