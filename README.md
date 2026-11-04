@@ -7,6 +7,7 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 ## Funktionen
 
 - **Serienaufnahme** mit der Rückkamera (Live-Vorschau, Auslöser, Licht/Taschenlampe falls verfügbar).
+- **Automatisch auslösen:** Liegt das Dokument ca. 1 Sekunde ruhig im Bild, wird das Foto von selbst gemacht (Fortschrittsring am Auslöser). Danach wartet die App, bis die nächste Seite aufgelegt ist – so entsteht kein Doppelfoto. Ein-/ausschaltbar über „Auto“ in der Kamera.
 - **Zoom & Kamerawahl:** Zoom-Tasten (z. B. 0,5× / 1× / 2×) und Zoomen mit zwei Fingern, Wechsel auf Ultraweitwinkel u. a. – sofern das Gerät es unterstützt. Modus **„Weites Sichtfeld“** (auf dem iPad automatisch aktiv) verhindert das stark vergrößerte Kamerabild.
   Ohne Kamerazugriff wird automatisch die Kamera-App des Geräts verwendet.
 - **Import** vorhandener Fotos (Mehrfachauswahl oder Drag & Drop am Desktop).

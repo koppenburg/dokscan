@@ -17,7 +17,7 @@
 
   // ---------- Einstellungen ----------
   const IS_IPAD = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null };
+  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true };
   const settings = (() => {
     try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('dokscan.settings') || '{}') }; }
     catch { return { ...DEFAULTS }; }
@@ -330,8 +330,80 @@
     $('#camCount').textContent = String(cam.added);
     $('#camLast').hidden = cam.added === 0;
     const page = `Seite ${pages.length + 1}`;
-    $('#camHint').textContent = !settings.autoCrop ? page : live.quad ? `${page} · Rand erkannt` : `${page} · Dokument suchen …`;
+    let hint = page;
+    if (settings.autoCrop) {
+      if (auto.waiting) hint = 'Nächste Seite auflegen …';
+      else if (auto.armed) hint = `${page} · Ruhig halten …`;
+      else hint = live.quad ? `${page} · Rand erkannt` : `${page} · Dokument suchen …`;
+    }
+    $('#camHint').textContent = hint;
+    $('#camAuto').hidden = !settings.autoCrop;
+    $('#camAuto').setAttribute('aria-pressed', String(!!settings.autoShoot));
   }
+
+  // ---------- Automatisch auslösen ----------
+  // Ist der Rand ~1,2 s lang ruhig erkannt, wird ausgelöst. Danach wird erst wieder ausgelöst,
+  // wenn das Dokument kurz weg war (Seite umgeblättert) oder sich das Bild deutlich geändert hat.
+  const AUTO_STABLE_TICKS = 5;       // × 250 ms
+  const AUTO_MOVE_TICK = 0.012;      // erlaubte Eckenbewegung pro Messung (Anteil der Bildgröße)
+  const AUTO_MOVE_TOTAL = 0.025;     // erlaubte Abweichung über die ganze Haltezeit
+  const auto = { stable: 0, anchor: null, prev: null, waiting: false, sig: null, armed: false, lost: 0 };
+  const sigCanvas = document.createElement('canvas');
+  sigCanvas.width = 24; sigCanvas.height = 24;
+  function signature() {
+    const x = sigCanvas.getContext('2d', { willReadFrequently: true });
+    x.drawImage(video, 0, 0, 24, 24);
+    const d = x.getImageData(0, 0, 24, 24).data;
+    const s = new Float32Array(576);
+    for (let i = 0; i < 576; i++) s[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+    return s;
+  }
+  const sigDiff = (a, b) => { let t = 0; for (let i = 0; i < a.length; i++) t += Math.abs(a[i] - b[i]); return t / a.length; };
+  const cornerDist = (a, b) => Math.max(...a.map((p, i) => Math.hypot(p[0] - b[i][0], p[1] - b[i][1])));
+  function resetAuto() {
+    auto.stable = 0; auto.anchor = null; auto.prev = null; auto.armed = false;
+    setArming(0);
+  }
+  function setArming(p) {
+    const sh = $('#camShutter');
+    sh.style.setProperty('--p', String(p));
+    sh.classList.toggle('arming', p > 0);
+    $('#camera').classList.toggle('arming', p > 0);
+  }
+  function autoTick(raw) {
+    if (!settings.autoShoot || !settings.autoCrop || cam.shooting) { resetAuto(); return; }
+    if (auto.waiting) {
+      // erst wieder scharf schalten, wenn Dokument weg war oder Bild sich klar geändert hat
+      auto.lost = raw ? 0 : auto.lost + 1;
+      if (auto.lost >= 2 || (auto.sig && sigDiff(signature(), auto.sig) > 10)) { auto.waiting = false; auto.lost = 0; }
+      resetAuto();
+      return;
+    }
+    if (!raw) { resetAuto(); return; }
+    if (!auto.prev || cornerDist(raw, auto.prev) > AUTO_MOVE_TICK || (auto.anchor && cornerDist(raw, auto.anchor) > AUTO_MOVE_TOTAL)) {
+      auto.stable = 0;
+      auto.anchor = raw;
+    } else {
+      auto.stable++;
+    }
+    auto.prev = raw;
+    auto.armed = auto.stable > 0;
+    setArming(Math.min(1, auto.stable / AUTO_STABLE_TICKS));
+    if (auto.stable >= AUTO_STABLE_TICKS) {
+      resetAuto();
+      auto.waiting = true;
+      auto.sig = signature();
+      shoot();
+    }
+  }
+  $('#camAuto').addEventListener('click', () => {
+    settings.autoShoot = !settings.autoShoot;
+    saveSettings();
+    resetAuto();
+    auto.waiting = false;
+    updateCamUi();
+    toast(settings.autoShoot ? 'Automatisch auslösen: an' : 'Automatisch auslösen: aus');
+  });
 
   // Live-Randerkennung im Kamerabild
   const live = { timer: null, quad: null, miss: 0 };
@@ -340,6 +412,8 @@
     if (settings.autoCrop) live.timer = setInterval(liveTick, 250);
   }
   function stopLive() {
+    resetAuto();
+    auto.waiting = false;
     clearInterval(live.timer);
     live.timer = null;
     live.quad = null;
@@ -356,6 +430,7 @@
     } else if (++live.miss > 3) {
       live.quad = null;
     }
+    try { autoTick(q); } catch (e) { console.warn(e); }
     drawLive();
   }
   function drawLive() {
@@ -555,6 +630,7 @@
   async function shoot() {
     if (!video.videoWidth || cam.shooting) return;
     cam.shooting = true;
+    if (!auto.waiting) { resetAuto(); auto.waiting = true; try { auto.sig = signature(); } catch { auto.sig = null; } }
     const flash = $('#camFlash');
     flash.classList.remove('on'); void flash.offsetWidth; flash.classList.add('on');
     if (navigator.vibrate) navigator.vibrate(15);
@@ -1019,12 +1095,14 @@
     $('#setAutoCrop').checked = settings.autoCrop;
     $('#setAutoPdf').checked = settings.autoPdf;
     $('#setWideFov').checked = settings.wideFov;
+    $('#setAutoShoot').checked = settings.autoShoot;
     $('#setClear').disabled = pages.length === 0;
     setDialog.showModal();
   });
   $('#setAutoCrop').addEventListener('change', (e) => { settings.autoCrop = e.target.checked; saveSettings(); });
   $('#setAutoPdf').addEventListener('change', (e) => { settings.autoPdf = e.target.checked; saveSettings(); });
   $('#setWideFov').addEventListener('change', (e) => { settings.wideFov = e.target.checked; saveSettings(); });
+  $('#setAutoShoot').addEventListener('change', (e) => { settings.autoShoot = e.target.checked; saveSettings(); });
   setDialog.addEventListener('click', (e) => { if (e.target === setDialog) setDialog.close(); });
 
   async function clearAll() {
