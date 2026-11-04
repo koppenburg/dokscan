@@ -18,7 +18,8 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 - **Filter:** Dokument (Schatten entfernen, weißes Papier), Original, Graustufen, Schwarz-Weiß.
 - Seiten **drehen, löschen und per Ziehen umsortieren**.
 - **Texterkennung (OCR):** Der Text wird lokal auf dem Gerät erkannt (Tesseract, Deutsch). Das PDF wird durchsuchbar, Text lässt sich markieren und kopieren; im Editor zeigt „Text“ den erkannten Text zum Kopieren. Beim ersten Mal werden ca. 9 MB geladen, danach funktioniert es offline.
-- **PDF automatisch nach dem Scannen**: DIN A4 oder Fotoformat, drei Qualitätsstufen,
+- **PDF-Einstellungen**: Seitenformat A4, A5, US Letter oder wie Foto; Ausrichtung automatisch/hoch/quer; Seitenrand ohne/5/10/20 mm; maximale Dateigröße 1/2/5 MB (z. B. für E-Mail) – die Bilder werden dann nur so weit verkleinert wie nötig.
+- **PDF automatisch nach dem Scannen**: drei Qualitätsstufen,
   danach teilen (z. B. Mail, WhatsApp, Dateien), speichern oder ansehen.
 - Seiten bleiben beim Neuladen erhalten (IndexedDB), bis ein neues Dokument begonnen wird.
 - Installierbar auf dem Homescreen und offline nutzbar (Service Worker).

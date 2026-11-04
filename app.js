@@ -3,11 +3,6 @@
   const $ = (s) => document.querySelector(s);
   const MAX_DIM = 3000;
   const A4W = 595.28, A4H = 841.89;
-  const QUALITY = {
-    high: { dim: 3000, q: 0.9 },
-    medium: { dim: 2000, q: 0.78 },
-    low: { dim: 1400, q: 0.62 },
-  };
   const FILTERS = [
     ['document', 'Dokument'],
     ['original', 'Original'],
@@ -17,7 +12,7 @@
 
   // ---------- Einstellungen ----------
   const IS_IPAD = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true, blurWarn: true };
+  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true, blurWarn: true, orient: 'auto', margin: 0, maxSize: 0 };
   const settings = (() => {
     try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('dokscan.settings') || '{}') }; }
     catch { return { ...DEFAULTS }; }
@@ -513,7 +508,19 @@
       const r = await call({ type: 'encode', bitmap, maxDim }, 30000, [bitmap]);
       return r.ok ? r.result : null;
     }
-    return { run, init, encodeFrame };
+    /** Bild verkleinern/komprimieren (im Worker, sonst im Hauptthread). */
+    async function reencode(blob, dim, q) {
+      if (await init()) {
+        const r = await call({ type: 'reencode', blob, dim, q }, 60000);
+        if (r.ok) return r.result;
+      }
+      const img = await Img.load(blob);
+      const c = Img.draw(img, dim);
+      const out = { blob: await Img.toBlob(c, 'image/jpeg', q), w: c.width, h: c.height };
+      Img.release(c);
+      return out;
+    }
+    return { run, init, encodeFrame, reencode };
   })();
 
   async function processPage(p) {
@@ -1660,11 +1667,37 @@
     $('#pdfName').value = currentDoc ? currentDoc.name.replace(/:/g, '-') : defaultName();
     setRadio('format', settings.format);
     setRadio('quality', settings.quality);
+    setRadio('orient', settings.orient);
+    setRadio('margin', String(settings.margin));
+    setRadio('maxsize', String(settings.maxSize));
     $('#pdfOcr').checked = settings.ocr;
+    // aufgeklappt, wenn vom Standard abweichend
+    $('#pdfMore').open = settings.orient !== 'auto' || settings.margin !== 0 || settings.maxSize !== 0;
+    updatePdfOptionUi();
     $('#pdfProgress').hidden = true;
     updatePdfBlurNote();
     if (!pdfDialog.open) pdfDialog.showModal();
     if (auto) generatePdf();
+  }
+
+  function readPdfOptions() {
+    settings.format = getRadio('format') || 'a4';
+    settings.quality = getRadio('quality') || 'medium';
+    settings.orient = getRadio('orient') || 'auto';
+    settings.margin = Number(getRadio('margin') || 0);
+    settings.maxSize = Number(getRadio('maxsize') || 0);
+    settings.ocr = $('#pdfOcr').checked;
+    saveSettings();
+  }
+  function updatePdfOptionUi() {
+    const fixed = (getRadio('format') || 'a4') !== 'image';
+    $('#pdfOrientField').classList.toggle('disabled', !fixed);
+    $('#pdfMarginField').classList.toggle('disabled', !fixed);
+    const orientLabel = { auto: 'Ausrichtung automatisch', portrait: 'Hochformat', landscape: 'Querformat' }[getRadio('orient') || 'auto'];
+    const m = Number(getRadio('margin') || 0), mx = Number(getRadio('maxsize') || 0);
+    const parts = fixed ? [orientLabel, m ? `Rand ${m} mm` : 'ohne Rand'] : ['Seite wie Foto'];
+    parts.push(mx ? `max. ${mx} MB` : 'ohne Größengrenze');
+    $('#pdfMoreSummary').textContent = parts.join(' · ');
   }
 
   function updatePdfBlurNote() {
@@ -1673,46 +1706,96 @@
     if (nums.length) $('#pdfBlurText').textContent = nums.length === 1 ? `Seite ${nums[0]} wirkt unscharf.` : `Seiten ${nums.join(', ')} wirken unscharf.`;
   }
 
-  async function buildPdf(format, qualityKey, onProgress, withOcr = false) {
-    const preset = QUALITY[qualityKey] || QUALITY.medium;
-    const out = [];
+  // Seitengrößen in pt (1 pt = 1/72 Zoll)
+  const PAGE_SIZES = { a4: [595.28, 841.89], a5: [419.53, 595.28], letter: [612, 792] };
+  const MM = 72 / 25.4;
+  // Stufen für Auflösung (längste Seite in px) und JPEG-Qualität – von groß nach klein
+  const LADDER = [[3000, 0.9], [2400, 0.84], [2000, 0.78], [1700, 0.72], [1400, 0.65], [1200, 0.58], [1000, 0.52], [850, 0.46], [700, 0.42]];
+  const QUALITY_LEVEL = { high: 0, medium: 2, low: 4 };
+
+  /** Position des Fotos auf der PDF-Seite (pt) nach Format, Ausrichtung und Rand. */
+  function pageLayout(w, h, o) {
+    let pageW, pageH, m = 0;
+    if (o.format === 'image' || !PAGE_SIZES[o.format]) {
+      const k = A4H / Math.max(w, h);
+      pageW = w * k; pageH = h * k;
+    } else {
+      const [sw, sh] = PAGE_SIZES[o.format];
+      const portrait = o.orient === 'portrait' || (o.orient !== 'landscape' && h >= w);
+      pageW = portrait ? sw : sh;
+      pageH = portrait ? sh : sw;
+      m = (o.margin || 0) * MM;
+    }
+    const bw = pageW - 2 * m, bh = pageH - 2 * m;
+    const s = Math.min(bw / w, bh / h);
+    const iw = w * s, ih = h * s;
+    return { pageW, pageH, x: (pageW - iw) / 2, y: (pageH - ih) / 2, iw, ih };
+  }
+
+  /**
+   * PDF aus den Seiten des offenen Dokuments.
+   * opts: { format: a4|a5|letter|image, orient: auto|portrait|landscape, margin (mm), quality: high|medium|low,
+   *         maxBytes (0 = ohne Grenze), ocr }
+   * Mit maxBytes werden die Bilder schrittweise verkleinert, bis das PDF passt (oder die kleinste Stufe erreicht ist).
+   */
+  async function buildPdf(opts, onProgress) {
+    // ältere Aufrufform: buildPdf(format, quality, onProgress, withOcr)
+    if (typeof opts === 'string') { const a = arguments; opts = { format: a[0], quality: a[1], ocr: !!a[3] }; onProgress = a[2]; }
+    const o = { format: 'a4', orient: 'auto', margin: 0, quality: 'medium', maxBytes: 0, ocr: false, ...opts };
+    onProgress = typeof onProgress === 'function' ? onProgress : () => {};
+    const n = pages.length;
     let ocrFailed = false;
-    for (let i = 0; i < pages.length; i++) {
+    // 1) Texterkennung (falls gewünscht) – unabhängig von der Bildgröße
+    for (let i = 0; i < n; i++) {
       const p = pages[i];
-      onProgress(i, pages.length);
-      await tick();
       if (!p.processed) throw new Error(`Seite ${i + 1} konnte nicht verarbeitet werden.`);
-      if (withOcr && !ocrFailed) {
-        try { await ensureOcr(p, (m) => onProgress(i, pages.length, ocrStatus(m))); }
+      if (o.ocr && !ocrFailed) {
+        onProgress(i, n);
+        try { await ensureOcr(p, (m) => onProgress(i, n, ocrStatus(m))); }
         catch (e) { console.warn(e); ocrFailed = true; }
       }
-      let blob = p.processed, w = p.pw, h = p.ph;
-      if (Math.max(w, h) > preset.dim || preset.q < 0.9) {
-        const img = await Img.load(p.processed);
-        const c = Img.draw(img, preset.dim);
-        w = c.width; h = c.height;
-        blob = await Img.toBlob(c, 'image/jpeg', preset.q);
-        Img.release(c);
-      }
-      const jpeg = new Uint8Array(await blob.arrayBuffer());
-      let pageW, pageH;
-      if (format === 'image') {
-        const k = A4H / Math.max(w, h);
-        pageW = w * k; pageH = h * k;
-      } else {
-        const portrait = h >= w;
-        pageW = portrait ? A4W : A4H;
-        pageH = portrait ? A4H : A4W;
-      }
-      const s = Math.min(pageW / w, pageH / h);
-      const iw = w * s, ih = h * s;
-      const x = (pageW - iw) / 2, y = (pageH - ih) / 2;
-      const text = withOcr && p.ocr && p.ocr.key === p.procKey ? textLayer(p, x, y, iw / p.pw) : null;
-      out.push({ jpeg, pageWidth: pageW, pageHeight: pageH, x, y, w: iw, h: ih, text });
     }
-    onProgress(pages.length, pages.length);
-    const blob = PDFWriter.build(out, { title: fileName().replace(/\.pdf$/, ''), producer: 'DokScan' });
+    // 2) Bilder in einer Stufe kodieren und PDF zusammensetzen
+    const encodeAt = async (level, label) => {
+      const [dim, q] = LADDER[level];
+      const imgs = [];
+      for (let i = 0; i < n; i++) {
+        const p = pages[i];
+        onProgress(i, n, label ? { text: label, progress: i / n, recognizing: false } : null);
+        await tick();
+        if (level === 0 && Math.max(p.pw, p.ph) <= dim) imgs.push({ blob: p.processed, w: p.pw, h: p.ph });
+        else imgs.push(await Proc.reencode(p.processed, dim, q));
+      }
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const p = pages[i], im = imgs[i];
+        const L = pageLayout(im.w, im.h, o);
+        const text = o.ocr && p.ocr && p.ocr.key === p.procKey ? textLayer(p, L.x, L.y, L.iw / p.pw) : null;
+        out.push({ jpeg: new Uint8Array(await im.blob.arrayBuffer()), pageWidth: L.pageW, pageHeight: L.pageH, x: L.x, y: L.y, w: L.iw, h: L.ih, text });
+      }
+      return PDFWriter.build(out, { title: fileName().replace(/\.pdf$/, ''), producer: 'DokScan' });
+    };
+    let level = QUALITY_LEVEL[o.quality] != null ? QUALITY_LEVEL[o.quality] : 2;
+    let blob = await encodeAt(level);
+    // 3) Auf Zielgröße bringen: geschätzte Stufe anspringen, bei Bedarf weiter verkleinern
+    const target = o.maxBytes ? o.maxBytes * 0.97 : 0;
+    const qf = (q) => 0.25 + q;
+    while (target && blob.size > target && level < LADDER.length - 1) {
+      const [d0, q0] = LADDER[level];
+      let next = level + 1;
+      while (next < LADDER.length - 1) {
+        const [d, q] = LADDER[next];
+        const predicted = blob.size * (d / d0) ** 2 * (qf(q) / qf(q0));
+        if (predicted <= target * 0.92) break;
+        next++;
+      }
+      level = next;
+      blob = await encodeAt(level, `Datei wird auf unter ${fmtSize(o.maxBytes)} verkleinert …`);
+    }
+    onProgress(n, n);
     blob.ocrFailed = ocrFailed;
+    blob.level = level;
+    blob.fitsTarget = !o.maxBytes || blob.size <= o.maxBytes;
     return blob;
   }
 
@@ -1720,10 +1803,7 @@
     if (pdfState.busy) return;
     pdfState.busy = true;
     resetPdfResult();
-    settings.format = getRadio('format') || 'a4';
-    settings.quality = getRadio('quality') || 'medium';
-    settings.ocr = $('#pdfOcr').checked;
-    saveSettings();
+    readPdfOptions();
     $('#pdfGenerate').disabled = true;
     $('#pdfProgress').hidden = false;
     const bar = $('#pdfProgressBar');
@@ -1734,22 +1814,29 @@
         text.textContent = 'Seiten werden noch bearbeitet …';
         await whenIdle();
       }
-      const blob = await buildPdf(settings.format, settings.quality, (i, n, ocr) => {
+      const blob = await buildPdf({
+        format: settings.format, orient: settings.orient, margin: settings.margin,
+        quality: settings.quality, maxBytes: settings.maxSize * 1024 * 1024, ocr: settings.ocr,
+      }, (i, n, ocr) => {
         const part = ocr && ocr.recognizing ? ocr.progress : 0;
         bar.style.width = `${Math.round(((i + part) / n) * 100)}%`;
         if (ocr && !ocr.recognizing) text.textContent = ocr.text;
         else if (ocr) text.textContent = `Texterkennung Seite ${i + 1} von ${n} …`;
         else text.textContent = i < n ? `Seite ${i + 1} von ${n} …` : 'PDF wird zusammengefügt …';
-      }, settings.ocr);
+      });
       pdfState.blob = blob;
       updatePdfBlurNote();
       pdfState.url = URL.createObjectURL(blob);
       $('#pdfResName').textContent = fileName();
       $('#pdfResMeta').textContent = `${pages.length} ${pages.length === 1 ? 'Seite' : 'Seiten'} · ${fmtSize(blob.size)}` +
-        (settings.ocr ? (blob.ocrFailed ? ' · ohne Texterkennung (nicht verfügbar)' : ' · durchsuchbar') : '');
+        (settings.ocr ? (blob.ocrFailed ? ' · ohne Texterkennung (nicht verfügbar)' : ' · durchsuchbar') : '') +
+        (settings.maxSize ? (blob.fitsTarget ? ` · unter ${settings.maxSize} MB` : ` · ${settings.maxSize} MB nicht erreichbar`) : '');
       $('#pdfShare').hidden = !canShareFile(blob);
       $('#pdfResult').hidden = false;
       $('#pdfGenerate').hidden = true;
+      // Ergebnis mit „Teilen/Speichern“ sichtbar machen
+      $('#pdfMore').open = false;
+      requestAnimationFrame(() => $('#pdfResult').scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
     } catch (e) {
       console.error(e);
       $('#pdfError').textContent = e.message || 'PDF konnte nicht erstellt werden.';
@@ -1771,7 +1858,10 @@
 
   $('#btnPdf').addEventListener('click', () => openPdf(false));
   $('#pdfGenerate').addEventListener('click', generatePdf);
-  pdfDialog.addEventListener('change', (e) => { if ((e.target.type === 'radio' || e.target.id === 'pdfOcr') && pdfState.blob) resetPdfResult(); });
+  pdfDialog.addEventListener('change', (e) => {
+    if (e.target.type === 'radio') updatePdfOptionUi();
+    if ((e.target.type === 'radio' || e.target.id === 'pdfOcr') && pdfState.blob) resetPdfResult();
+  });
   $('#pdfName').addEventListener('input', () => { if (pdfState.blob) $('#pdfResName').textContent = fileName(); });
   $('#pdfShare').addEventListener('click', async () => {
     const f = pdfFile(pdfState.blob);

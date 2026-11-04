@@ -291,6 +291,17 @@ main { flex: 1; overflow-y: auto; padding: 6px 16px 20px; -webkit-overflow-scrol
 
 .text-out { width: 100%; min-height: 220px; max-height: 50vh; resize: vertical; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); color: var(--text); font: .92rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 12px; }
 
+/* ---------- Weitere Einstellungen (aufklappbar) ---------- */
+.more { border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+.more summary { list-style: none; cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 11px 14px; font-weight: 600; }
+.more summary::-webkit-details-marker { display: none; }
+.more summary::before { content: "›"; display: inline-block; transition: transform .15s; color: var(--muted); font-weight: 700; }
+.more[open] summary::before { transform: rotate(90deg); }
+.more-body { display: grid; gap: 14px; padding: 4px 14px 14px; }
+.field.disabled { opacity: .45; pointer-events: none; }
+.sheet-dialog { overflow-y: auto; }
+.seg span { white-space: nowrap; }
+
 /* ---------- Unschärfe ---------- */
 .card-blur { position: absolute; left: 6px; top: 6px; display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px 3px 6px; border-radius: 999px; background: #b45309; color: #fff; font-size: .74rem; font-weight: 700; pointer-events: none; }
 .card-blur .ic { width: 14px; height: 14px; }
