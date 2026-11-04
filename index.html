@@ -90,7 +90,10 @@
     <button id="camFallback" class="btn" type="button" hidden><svg class="ic"><use href="#i-camera"/></svg>Kamera-App verwenden</button>
   </div>
   <div class="cam-top">
-    <div class="cam-side"><button id="camClose" class="cam-round" type="button" aria-label="Kamera schließen"><svg class="ic"><use href="#i-x"/></svg></button></div>
+    <div class="cam-side">
+      <button id="camClose" class="cam-round" type="button" aria-label="Kamera schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+      <button id="camAuto" class="cam-auto" type="button" aria-pressed="true" title="Automatisch auslösen" hidden><span class="dot"></span>Auto</button>
+    </div>
     <span id="camHint" class="cam-pill">Seite 1</span>
     <div class="cam-side right">
       <button id="camSwitch" class="cam-round" type="button" aria-label="Kamera wechseln" title="Kamera wechseln" hidden><svg class="ic"><use href="#i-switch"/></svg></button>
@@ -214,6 +217,7 @@
       <div class="chips wrap" id="setFilter" role="radiogroup" aria-label="Standardfilter"></div>
     </div>
     <label class="switch"><input id="setAutoCrop" type="checkbox"><span class="track"></span><span>Dokumentränder automatisch erkennen</span></label>
+    <label class="switch"><input id="setAutoShoot" type="checkbox"><span class="track"></span><span>Automatisch auslösen<br><span class="muted small">Foto wird gemacht, sobald das Dokument ruhig erkannt ist</span></span></label>
     <label class="switch"><input id="setWideFov" type="checkbox"><span class="track"></span><span>Weites Sichtfeld<br><span class="muted small">Kamerabild ohne Zuschnitt (empfohlen für iPad), etwas geringere Auflösung</span></span></label>
     <label class="switch"><input id="setAutoPdf" type="checkbox"><span class="track"></span><span>Nach dem Scannen automatisch PDF erstellen</span></label>
     <p class="muted small">Seiten werden nur lokal in diesem Browser gespeichert, bis du ein neues Dokument beginnst.</p>
