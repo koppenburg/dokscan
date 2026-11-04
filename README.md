@@ -14,6 +14,7 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 - **Automatische Randerkennung**: Schon in der Kamera wird der erkannte Dokumentrand live als Rahmen angezeigt; das Foto wird automatisch zugeschnitten und entzerrt. Funktioniert auf dunklen, farbigen und hellen Untergründen. Ecken lassen sich mit Lupe manuell nachziehen.
 - **Filter:** Dokument (Schatten entfernen, weißes Papier), Original, Graustufen, Schwarz-Weiß.
 - Seiten **drehen, löschen und per Ziehen umsortieren**.
+- **Texterkennung (OCR):** Der Text wird lokal auf dem Gerät erkannt (Tesseract, Deutsch). Das PDF wird durchsuchbar, Text lässt sich markieren und kopieren; im Editor zeigt „Text“ den erkannten Text zum Kopieren. Beim ersten Mal werden ca. 9 MB geladen, danach funktioniert es offline.
 - **PDF automatisch nach dem Scannen**: DIN A4 oder Fotoformat, drei Qualitätsstufen,
   danach teilen (z. B. Mail, WhatsApp, Dateien), speichern oder ansehen.
 - Seiten bleiben beim Neuladen erhalten (IndexedDB), bis ein neues Dokument begonnen wird.
@@ -55,7 +56,9 @@ python3 -m http.server 8000
 | `index.html` | Oberfläche (Übersicht, Kamera, Editor, Dialoge) |
 | `app.js` | App-Logik, Kamera, Speicher, PDF-Ablauf |
 | `imaging.js` | Bildverarbeitung: Drehen, Perspektivkorrektur, Filter, Randerkennung |
-| `pdf.js` | Eigener, minimaler PDF-Writer (JPEG-Seiten) |
+| `pdf.js` | Eigener, minimaler PDF-Writer (JPEG-Seiten, unsichtbare Textebene) |
+| `proc-worker.js` | Hintergrund-Thread für die Bildverarbeitung |
+| `ocr.js`, `vendor/tesseract/` | Texterkennung (Tesseract, lokal eingebunden) |
 | `sw.js`, `manifest.webmanifest`, Icons | PWA / Offline |
 
 Nach Änderungen an App-Dateien `CACHE` in `sw.js` hochzählen, damit installierte Apps die neue Version laden.

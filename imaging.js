@@ -7,19 +7,28 @@ const Img = (() => {
   /** Normalisierte Ecken (oben links, oben rechts, unten rechts, unten links) des ganzen Bildes. */
   const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 
+  // Läuft im Hauptthread (Canvas) und im Web Worker (OffscreenCanvas).
+  const IN_WORKER = typeof document === 'undefined';
+
   function canvas(w, h) {
+    w = Math.max(1, Math.round(w));
+    h = Math.max(1, Math.round(h));
+    if (IN_WORKER) return new OffscreenCanvas(w, h);
     const c = document.createElement('canvas');
-    c.width = Math.max(1, Math.round(w));
-    c.height = Math.max(1, Math.round(h));
+    c.width = w;
+    c.height = h;
     return c;
   }
   /** Gibt Canvas-Speicher frei (wichtig für iOS Safari). */
   function release(c) {
-    if (c && c.width) { c.width = 0; c.height = 0; }
+    if (!c) return;
+    if (typeof c.close === 'function') { c.close(); return; } // ImageBitmap
+    if (c.width) { c.width = 0; c.height = 0; }
   }
   const ctx = (c) => c.getContext('2d');
 
   function load(blob) {
+    if (IN_WORKER) return createImageBitmap(blob);
     return new Promise((resolve, reject) => {
       const url = URL.createObjectURL(blob);
       const img = new Image();
@@ -59,7 +68,23 @@ const Img = (() => {
     return out;
   }
 
+  /** Schnelles Verkleinern in einem Schritt in ein wiederverwendetes Canvas (für die Live-Erkennung). */
+  let fastCanvas = null;
+  function drawFast(src, maxDim) {
+    const [sw, sh] = sizeOf(src);
+    const s = Math.min(1, maxDim / Math.max(sw, sh));
+    const tw = Math.max(1, Math.round(sw * s)), th = Math.max(1, Math.round(sh * s));
+    if (!fastCanvas) fastCanvas = canvas(tw, th);
+    if (fastCanvas.width !== tw || fastCanvas.height !== th) { fastCanvas.width = tw; fastCanvas.height = th; }
+    const x = fastCanvas.getContext('2d', { willReadFrequently: true });
+    x.imageSmoothingEnabled = true;
+    x.imageSmoothingQuality = 'low';
+    x.drawImage(src, 0, 0, tw, th);
+    return fastCanvas;
+  }
+
   function toBlob(c, type = 'image/jpeg', q = 0.9) {
+    if (typeof c.convertToBlob === 'function') return c.convertToBlob({ type, quality: q });
     return new Promise((resolve, reject) => {
       c.toBlob((b) => (b ? resolve(b) : reject(new Error('Bild konnte nicht erzeugt werden'))), type, q);
     });
@@ -480,11 +505,11 @@ const Img = (() => {
    * Prüft mehrere Merkmale (Helligkeit, „Papierweiß“) und Schwellwerte und nimmt das beste Viereck.
    * Gibt normalisierte Ecken zurück oder null, wenn nichts Sicheres gefunden wurde.
    */
-  function detect(src, size = 256) {
-    const small = draw(src, size);
+  function detect(src, size = 256, fast = false) {
+    const small = fast ? drawFast(src, size) : draw(src, size);
     const w = small.width, h = small.height, n = w * h;
-    const d = ctx(small).getImageData(0, 0, w, h).data;
-    release(small);
+    const d = (fast ? small.getContext('2d', { willReadFrequently: true }) : ctx(small)).getImageData(0, 0, w, h).data;
+    if (!fast) release(small);
     const gray = new Float32Array(n), white = new Float32Array(n);
     for (let i = 0; i < n; i++) {
       const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
@@ -548,5 +573,66 @@ const Img = (() => {
     return q;
   }
 
-  return { FULL, canvas, release, load, draw, toBlob, rotate, rotateCornersCW, isFull, isConvex, warp, filter, detect };
+  /**
+   * Schneidet dunkle Reststreifen des Untergrunds an den Rändern ab (höchstens 2 % je Seite).
+   */
+  function trimEdges(c) {
+    const W = c.width, H = c.height;
+    if (W < 50 || H < 50) return c;
+    const x = ctx(c);
+    const lum = (d) => { let s = 0; for (let i = 0; i < d.length; i += 4) s += d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114; return s / (d.length / 4); };
+    const line = (side, k) => {
+      if (side === 0) return lum(x.getImageData(0, k, W, 1).data);           // oben
+      if (side === 1) return lum(x.getImageData(0, H - 1 - k, W, 1).data);   // unten
+      if (side === 2) return lum(x.getImageData(k, 0, 1, H).data);           // links
+      return lum(x.getImageData(W - 1 - k, 0, 1, H).data);                   // rechts
+    };
+    const cut = [0, 0, 0, 0];
+    for (let side = 0; side < 4; side++) {
+      const len = side < 2 ? H : W;
+      const max = Math.max(2, Math.round(len * 0.02));
+      const ref = line(side, max + 3);
+      let k = 0;
+      while (k < max && line(side, k) < ref * 0.82) k++;
+      cut[side] = k < max ? k : 0; // ganzer Bereich dunkel → eher Inhalt, nichts abschneiden
+    }
+    if (!cut.some(Boolean)) return c;
+    const nw = W - cut[2] - cut[3], nh = H - cut[0] - cut[1];
+    const out = canvas(nw, nh);
+    ctx(out).drawImage(c, cut[2], cut[0], nw, nh, 0, 0, nw, nh);
+    return out;
+  }
+
+  /**
+   * Komplette Seitenverarbeitung (Hauptthread oder Worker):
+   * Original laden → drehen → ggf. Ränder erkennen → entzerren → Filter → JPEG + Vorschaubild.
+   */
+  async function processPage({ original, rotation, corners, filter: mode, autoDetect, maxDim = 3000 }) {
+    const img = await load(original);
+    let c = draw(img, maxDim);
+    release(img);
+    const r = rotate(c, rotation);
+    if (r !== c) { release(c); c = r; }
+    if (autoDetect) {
+      try { corners = detect(c) || corners; } catch (e) { /* Hinweis aus der Live-Erkennung behalten */ }
+    }
+    if (!isFull(corners)) {
+      const w = warp(c, corners, maxDim);
+      release(c); c = w;
+      const t = trimEdges(c);
+      if (t !== c) { release(c); c = t; }
+    }
+    filter(c, mode);
+    const processed = await toBlob(c, 'image/jpeg', 0.9);
+    const t = draw(c, 420);
+    const thumb = await toBlob(t, 'image/jpeg', 0.8);
+    const res = { processed, thumb, pw: c.width, ph: c.height, corners };
+    release(t); release(c);
+    return res;
+  }
+
+  /** Zuletzt für die Live-Erkennung verkleinertes Kamerabild (oder null). */
+  const lastFrame = () => fastCanvas;
+
+  return { FULL, canvas, release, load, draw, toBlob, lastFrame, rotate, rotateCornersCW, isFull, isConvex, warp, filter, detect, processPage };
 })();
