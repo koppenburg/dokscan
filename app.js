@@ -475,7 +475,7 @@
   const LiveW = (() => {
     const w = workerClient();
     let resizeOk = true;
-    async function detect(videoEl, size) {
+    async function detect(videoEl, size, prev) {
       if (!window.createImageBitmap || !(await w.init())) return null;
       const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
       const s = Math.min(1, size / Math.max(vw, vh));
@@ -488,7 +488,7 @@
       if (!bitmap) {
         try { bitmap = await createImageBitmap(videoEl); } catch { return null; }
       }
-      const r = await w.call({ type: 'live', bitmap, size }, 5000, [bitmap]);
+      const r = await w.call({ type: 'live', bitmap, size, prev: prev || null }, 5000, [bitmap]);
       return r.ok ? r.result : null;
     }
     return { detect, init: w.init };
@@ -547,6 +547,32 @@
     schedule(p);
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
     return p;
+  }
+
+  /** Ersetzt das Foto einer Seite (Neu aufnehmen); Position, Filter und Dokument bleiben. */
+  function replacePage(p, original, hint) {
+    const prev = { original: p.original, rotation: p.rotation, corners: p.corners, autoDetect: p.autoDetect, processed: p.processed, thumb: p.thumb, pw: p.pw, ph: p.ph, procKey: p.procKey, ocr: p.ocr };
+    Object.assign(p, {
+      original, rotation: 0,
+      corners: (settings.autoCrop && hint) || Img.FULL.map((x) => x.slice()),
+      autoDetect: settings.autoCrop,
+      processed: null, thumb: null, procKey: null, ocr: null, error: false,
+    });
+    persist(p);
+    schedule(p);
+    const i = pages.indexOf(p) + 1;
+    toast(`Seite ${i} wurde neu aufgenommen.`, {
+      label: 'Rückgängig',
+      onClick: () => {
+        Object.assign(p, prev, { error: false });
+        p.rev = (p.rev || 0) + 1; // laufende Verarbeitung des neuen Fotos verwerfen
+        p.pending = false;
+        persist(p);
+        renderCard(p);
+        if (editor.page === p) updatePreview();
+        toast('Vorheriges Foto wiederhergestellt.');
+      },
+    });
   }
 
   async function addFiles(files) {
@@ -717,6 +743,7 @@
     if (stack.includes(name)) return;
     stack.push(name);
     $('#' + name).hidden = false;
+    $('#' + name).style.zIndex = String(10 + stack.length); // zuletzt geöffnete Ansicht liegt oben
     document.body.classList.add('screen-open');
     try { history.pushState({ dokscan: stack.length }, ''); } catch { /* egal */ }
   }
@@ -751,8 +778,9 @@
   function updateCamUi() {
     $('#camDone').disabled = false;
     $('#camCount').textContent = String(cam.added);
-    $('#camLast').hidden = cam.added === 0;
-    const page = `Seite ${pages.length + 1}`;
+    const page = cam.retake ? `Seite ${pages.indexOf(cam.retake) + 1} neu` : `Seite ${pages.length + 1}`;
+    $('#camDone').hidden = !!cam.retake;
+    $('#camLast').hidden = cam.added === 0 || !!cam.retake;
     let hint = page;
     if (settings.autoCrop) {
       if (auto.waiting) hint = 'Nächste Seite auflegen …';
@@ -874,12 +902,12 @@
       const t0 = performance.now();
       let res = null;
       if (live.useWorker) {
-        res = await LiveW.detect(video, 192);
+        res = await LiveW.detect(video, 192, live.quad);
         if (!res) live.useWorker = false; // Rückfall auf den Hauptthread
       }
       if (!res) {
         let q = null;
-        try { q = Img.detect(video, 160, true); } catch { q = null; }
+        try { q = Img.detect(video, 160, true, live.quad); } catch { q = null; }
         res = { quad: q, sig: null };
       }
       if (!live.on || live.gen !== gen) break;
@@ -1112,8 +1140,10 @@
   }
 
   /** Kamera öffnen; fromLibrary = neues Dokument anlegen (erst beim ersten Foto). */
-  function openCamera(fromLibrary) {
-    cam.newDoc = !!fromLibrary;
+  /** Kamera öffnen; fromLibrary = neues Dokument anlegen (erst beim ersten Foto); retake = Seite ersetzen. */
+  function openCamera(fromLibrary, retake = null) {
+    cam.retake = retake;
+    cam.newDoc = !retake && !!fromLibrary;
     if (cam.newDoc) { pages.forEach(dropUrls); pages = []; currentDoc = null; renderGrid(); }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       $('#fileCapture').click();
@@ -1128,6 +1158,9 @@
 
   function onCameraClosed() {
     stopStream();
+    const wasRetake = !!cam.retake;
+    cam.retake = null;
+    if (wasRetake) { cam.added = 0; return; }
     const auto = cam.done && cam.added > 0 && settings.autoPdf;
     const fromLibrary = cam.newDoc;
     cam.newDoc = false;
@@ -1150,6 +1183,9 @@
     flash.classList.remove('on'); void flash.offsetWidth; flash.classList.add('on');
     if (navigator.vibrate) navigator.vibrate(15);
     const hint = live.quad && live.quad.map((p) => p.slice());
+    const retake = cam.retake;
+    // neues Foto: als neue Seite anhängen – oder beim Neu-Aufnehmen die Seite ersetzen
+    const deliver = (original) => { if (retake) replacePage(retake, original, hint); else addOriginal(original, hint); };
     const img = $('#camLast img');
     const showThumb = (blob) => {
       if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
@@ -1164,7 +1200,7 @@
         const enc = await Proc.encodeFrame(video, MAX_DIM);
         if (enc) {
           showThumb(enc.thumb);
-          addOriginal(enc.original, hint);
+          deliver(enc.original);
           return;
         }
         const c = Img.draw(video, MAX_DIM);
@@ -1174,9 +1210,11 @@
         Img.release(c);
         showThumb(await thumbBlob);
         Img.release(t);
-        addOriginal(original, hint);
+        deliver(original);
       })());
       updateCamUi();
+      // Neu aufnehmen: nach dem Foto zurück zum Editor
+      if (retake && topScreen() === 'camera') closeScreen();
     } catch (e) {
       console.error(e);
       toast('Aufnahme fehlgeschlagen.');
@@ -1218,7 +1256,22 @@
     return n;
   }
   $('#fileCapture').addEventListener('change', async (e) => {
-    const n = await importInto(e.target.files, cam.newDoc);
+    const files = e.target.files;
+    if (cam.retake && files && files.length) {
+      const p = cam.retake;
+      cam.retake = null;
+      e.target.value = '';
+      try {
+        const img = await Img.load(files[0]);
+        const c = Img.draw(img, MAX_DIM);
+        const original = await track(Img.toBlob(c, 'image/jpeg', 0.92));
+        Img.release(c);
+        replacePage(p, original, null);
+      } catch (err) { console.error(err); toast('Foto konnte nicht gelesen werden.'); }
+      return;
+    }
+    cam.retake = null;
+    const n = await importInto(files, cam.newDoc);
     cam.newDoc = false;
     e.target.value = '';
     if (n) toast('Seite hinzugefügt. Tippe auf „Scannen“ für die nächste.');
@@ -1347,6 +1400,7 @@
   });
   textDialog.addEventListener('click', (e) => { if (e.target === textDialog) textDialog.close(); });
 
+  $('#edRetake').addEventListener('click', () => { if (editor.page) openCamera(false, editor.page); });
   $('#edBack').addEventListener('click', closeScreen);
   $('#edMovePrev').addEventListener('click', () => movePage(-1));
   $('#edMoveNext').addEventListener('click', () => movePage(1));
@@ -1714,13 +1768,25 @@
 
   // ---------- Toast ----------
   let toastTimer = null;
-  function toast(msg) {
+  let toastHandler = null;
+  /** Kurzer Hinweis; optional mit Aktion, z. B. { label: 'Rückgängig', onClick } */
+  function toast(msg, action) {
     const t = $('#toast');
-    t.textContent = msg;
+    $('#toastText').textContent = msg;
+    const btn = $('#toastAction');
+    toastHandler = action ? action.onClick : null;
+    btn.hidden = !action;
+    if (action) btn.textContent = action.label;
     t.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
+    toastTimer = setTimeout(() => { t.classList.remove('show'); toastHandler = null; }, action ? 6000 : 2800);
   }
+  $('#toastAction').addEventListener('click', () => {
+    const f = toastHandler;
+    toastHandler = null;
+    $('#toast').classList.remove('show');
+    if (f) f();
+  });
 
   // Bilder per Drag & Drop (Desktop)
   const dropTarget = () => (!stack.length ? 'library' : topScreen() === 'docview' ? 'doc' : null);

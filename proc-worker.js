@@ -16,7 +16,7 @@ self.onmessage = async (e) => {
     }
     if (job.type === 'live') {
       // Live-Randerkennung auf einem verkleinerten Kamerabild + Bildsignatur (für „neue Seite?“)
-      const quad = Img.detect(job.bitmap, job.size, true);
+      const quad = Img.detect(job.bitmap, job.size, true, job.prev || null);
       job.bitmap.close();
       const f = Img.lastFrame();
       if (!sigCanvas) sigCanvas = new OffscreenCanvas(24, 24);
