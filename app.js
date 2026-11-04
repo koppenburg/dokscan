@@ -17,7 +17,7 @@
 
   // ---------- Einstellungen ----------
   const IS_IPAD = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true };
+  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true, blurWarn: true };
   const settings = (() => {
     try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('dokscan.settings') || '{}') }; }
     catch { return { ...DEFAULTS }; }
@@ -107,7 +107,7 @@
   const record = (p) => ({
     id: p.id, docId: p.docId, order: p.order, created: p.created, original: p.original,
     rotation: p.rotation, corners: p.corners, filter: p.filter, autoDetect: !!(p.autoDetect && !p.processed),
-    processed: p.processed, pw: p.pw, ph: p.ph, thumb: p.thumb, procKey: p.procKey, ocr: p.ocr,
+    processed: p.processed, pw: p.pw, ph: p.ph, thumb: p.thumb, procKey: p.procKey, ocr: p.ocr, blur: p.blur,
   });
   const persist = (p) => {
     if (p.deleted || !p.docId) return;
@@ -431,6 +431,7 @@
         const result = await processPage(p);
         if (p.rev !== rev) continue; // wurde inzwischen geändert und neu eingereiht
         Object.assign(p, result, { pending: false, error: false, procKey: uid() });
+        if (p.camSession && p.camSession === cam.session && blurLevel(p) && topScreen() === 'camera') warnBlurInCamera(p);
         if (settings.ocr) ensureOcr(p).catch(() => {}); // Text im Hintergrund erkennen
       } catch (e) {
         console.error(e);
@@ -551,12 +552,12 @@
 
   /** Ersetzt das Foto einer Seite (Neu aufnehmen); Position, Filter und Dokument bleiben. */
   function replacePage(p, original, hint) {
-    const prev = { original: p.original, rotation: p.rotation, corners: p.corners, autoDetect: p.autoDetect, processed: p.processed, thumb: p.thumb, pw: p.pw, ph: p.ph, procKey: p.procKey, ocr: p.ocr };
+    const prev = { original: p.original, rotation: p.rotation, corners: p.corners, autoDetect: p.autoDetect, processed: p.processed, thumb: p.thumb, pw: p.pw, ph: p.ph, procKey: p.procKey, ocr: p.ocr, blur: p.blur };
     Object.assign(p, {
       original, rotation: 0,
       corners: (settings.autoCrop && hint) || Img.FULL.map((x) => x.slice()),
       autoDetect: settings.autoCrop,
-      processed: null, thumb: null, procKey: null, ocr: null, error: false,
+      processed: null, thumb: null, procKey: null, ocr: null, blur: null, error: false,
     });
     persist(p);
     schedule(p);
@@ -593,6 +594,11 @@
     }
     return ok;
   }
+
+  // ---------- Unschärfe ----------
+  // Kalibriert an Testseiten: ≤ 0,46 gut lesbar, ab ~0,5 sichtbar unscharf, ab ~0,6 schwer lesbar
+  const BLUR_WARN = 0.5, BLUR_BAD = 0.6;
+  const blurLevel = (p) => (!settings.blurWarn || p.blur == null ? 0 : p.blur >= BLUR_BAD ? 2 : p.blur >= BLUR_WARN ? 1 : 0);
 
   // ---------- Texterkennung ----------
   /** Liefert den erkannten Text der aktuellen Seitenversion (aus Cache oder neu erkannt). */
@@ -660,7 +666,7 @@
     li.dataset.id = p.id;
     li.innerHTML =
       `<button class="card-open" type="button"><img alt=""><span class="spinner"></span><span class="card-err">Fehler</span></button>` +
-      `<span class="card-num"></span>` +
+      `<span class="card-num"></span><span class="card-blur" hidden><svg class="ic"><use href="#i-warn"/></svg>unscharf</span>` +
       `<span class="drag" role="button" tabindex="-1" aria-label="Verschieben"><svg class="ic"><use href="#i-grip"/></svg></span>`;
     fillCard(li, p, i);
     return li;
@@ -675,6 +681,10 @@
     img.hidden = !url;
     li.classList.toggle('loading', !!p.pending);
     li.classList.toggle('error', !!p.error);
+    const lvl = p.pending ? 0 : blurLevel(p);
+    const badge = li.querySelector('.card-blur');
+    badge.hidden = !lvl;
+    badge.classList.toggle('bad', lvl === 2);
   }
 
   function renderCard(p) {
@@ -1143,6 +1153,8 @@
   /** Kamera öffnen; fromLibrary = neues Dokument anlegen (erst beim ersten Foto); retake = Seite ersetzen. */
   function openCamera(fromLibrary, retake = null) {
     cam.retake = retake;
+    cam.retakeStay = false;
+    cam.session = uid();
     cam.newDoc = !retake && !!fromLibrary;
     if (cam.newDoc) { pages.forEach(dropUrls); pages = []; currentDoc = null; renderGrid(); }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -1158,8 +1170,10 @@
 
   function onCameraClosed() {
     stopStream();
-    const wasRetake = !!cam.retake;
+    const wasRetake = !!cam.retake && !cam.retakeStay;
     cam.retake = null;
+    cam.retakeStay = false;
+    cam.session = null;
     if (wasRetake) { cam.added = 0; return; }
     const auto = cam.done && cam.added > 0 && settings.autoPdf;
     const fromLibrary = cam.newDoc;
@@ -1175,6 +1189,24 @@
     }, 50);
   }
 
+  /** Hinweis in der Kamera: letzte Aufnahme unscharf → direkt neu aufnehmen (Kamera bleibt offen). */
+  function warnBlurInCamera(p) {
+    if (cam.retake) return;
+    const i = pages.indexOf(p) + 1;
+    if (!i) return;
+    toast(`Seite ${i} wirkt unscharf.`, {
+      label: 'Neu aufnehmen',
+      onClick: () => {
+        if (topScreen() !== 'camera' || !pages.includes(p)) return;
+        cam.retake = p;
+        cam.retakeStay = true;
+        auto.waiting = false; // dieselbe Seite darf sofort wieder automatisch ausgelöst werden
+        resetAuto();
+        updateCamUi();
+      },
+    });
+  }
+
   async function shoot() {
     if (!video.videoWidth || cam.shooting) return;
     cam.shooting = true;
@@ -1185,7 +1217,12 @@
     const hint = live.quad && live.quad.map((p) => p.slice());
     const retake = cam.retake;
     // neues Foto: als neue Seite anhängen – oder beim Neu-Aufnehmen die Seite ersetzen
-    const deliver = (original) => { if (retake) replacePage(retake, original, hint); else addOriginal(original, hint); };
+    const stay = cam.retakeStay;
+    const session = cam.session;
+    const deliver = (original) => {
+      if (retake) { replacePage(retake, original, hint); retake.camSession = session; }
+      else { const np = addOriginal(original, hint); np.camSession = session; }
+    };
     const img = $('#camLast img');
     const showThumb = (blob) => {
       if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
@@ -1213,8 +1250,9 @@
         deliver(original);
       })());
       updateCamUi();
-      // Neu aufnehmen: nach dem Foto zurück zum Editor
-      if (retake && topScreen() === 'camera') closeScreen();
+      // Neu aufnehmen aus dem Editor: zurück zum Editor; aus der Kamera-Warnung: weiter fotografieren
+      if (retake && stay) { cam.retake = null; cam.retakeStay = false; updateCamUi(); }
+      else if (retake && topScreen() === 'camera') closeScreen();
     } catch (e) {
       console.error(e);
       toast('Aufnahme fehlgeschlagen.');
@@ -1335,6 +1373,9 @@
     if (url && img.getAttribute('src') !== url) img.src = url;
     img.hidden = !url;
     $('#edSpinner').hidden = !p.pending;
+    const lvl = p.pending ? 0 : blurLevel(p);
+    $('#edBlur').hidden = !lvl || !!editor.crop;
+    $('#edBlurText').textContent = lvl === 2 ? 'Foto ist unscharf – Text schwer lesbar.' : 'Foto wirkt unscharf.';
     $('#edPreviewWrap').classList.toggle('busy', !!p.pending);
   }
 
@@ -1401,6 +1442,7 @@
   textDialog.addEventListener('click', (e) => { if (e.target === textDialog) textDialog.close(); });
 
   $('#edRetake').addEventListener('click', () => { if (editor.page) openCamera(false, editor.page); });
+  $('#edBlurRetake').addEventListener('click', () => { if (editor.page) openCamera(false, editor.page); });
   $('#edBack').addEventListener('click', closeScreen);
   $('#edMovePrev').addEventListener('click', () => movePage(-1));
   $('#edMoveNext').addEventListener('click', () => movePage(1));
@@ -1425,6 +1467,7 @@
   const loupe = $('#loupe');
 
   function showCropUi(on) {
+    if (on) $('#edBlur').hidden = true;
     $('#edPreviewWrap').hidden = on;
     cropWrap.hidden = !on;
     $('#edTools').hidden = on;
@@ -1455,6 +1498,7 @@
   function endCrop() {
     editor.crop = null;
     showCropUi(false);
+    updatePreview();
     loupe.hidden = true;
   }
 
@@ -1618,8 +1662,15 @@
     setRadio('quality', settings.quality);
     $('#pdfOcr').checked = settings.ocr;
     $('#pdfProgress').hidden = true;
+    updatePdfBlurNote();
     if (!pdfDialog.open) pdfDialog.showModal();
     if (auto) generatePdf();
+  }
+
+  function updatePdfBlurNote() {
+    const nums = pages.map((p, i) => (blurLevel(p) ? i + 1 : 0)).filter(Boolean);
+    $('#pdfBlur').hidden = !nums.length;
+    if (nums.length) $('#pdfBlurText').textContent = nums.length === 1 ? `Seite ${nums[0]} wirkt unscharf.` : `Seiten ${nums.join(', ')} wirken unscharf.`;
   }
 
   async function buildPdf(format, qualityKey, onProgress, withOcr = false) {
@@ -1691,6 +1742,7 @@
         else text.textContent = i < n ? `Seite ${i + 1} von ${n} …` : 'PDF wird zusammengefügt …';
       }, settings.ocr);
       pdfState.blob = blob;
+      updatePdfBlurNote();
       pdfState.url = URL.createObjectURL(blob);
       $('#pdfResName').textContent = fileName();
       $('#pdfResMeta').textContent = `${pages.length} ${pages.length === 1 ? 'Seite' : 'Seiten'} · ${fmtSize(blob.size)}` +
@@ -1752,12 +1804,14 @@
     $('#setWideFov').checked = settings.wideFov;
     $('#setAutoShoot').checked = settings.autoShoot;
     $('#setOcr').checked = settings.ocr;
+    $('#setBlurWarn').checked = settings.blurWarn;
     setDialog.showModal();
   });
   $('#setAutoCrop').addEventListener('change', (e) => { settings.autoCrop = e.target.checked; saveSettings(); });
   $('#setAutoPdf').addEventListener('change', (e) => { settings.autoPdf = e.target.checked; saveSettings(); });
   $('#setWideFov').addEventListener('change', (e) => { settings.wideFov = e.target.checked; saveSettings(); });
   $('#setAutoShoot').addEventListener('change', (e) => { settings.autoShoot = e.target.checked; saveSettings(); });
+  $('#setBlurWarn').addEventListener('change', (e) => { settings.blurWarn = e.target.checked; saveSettings(); renderGrid(); });
   $('#setOcr').addEventListener('change', (e) => {
     settings.ocr = e.target.checked;
     saveSettings();
@@ -1777,6 +1831,7 @@
     toastHandler = action ? action.onClick : null;
     btn.hidden = !action;
     if (action) btn.textContent = action.label;
+    t.style.bottom = topScreen() === 'camera' ? 'calc(env(safe-area-inset-bottom) + 190px)' : '';
     t.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { t.classList.remove('show'); toastHandler = null; }, action ? 6000 : 2800);

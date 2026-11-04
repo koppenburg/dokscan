@@ -1062,6 +1062,41 @@ const Img = (() => {
   }
 
   /**
+   * Unschärfe-Maß nach Crété-Roffet et al. („The Blur Effect“, 2007): Wie viel Kantenvariation geht
+   * verloren, wenn man das Bild zusätzlich weichzeichnet? Scharfe Fotos verlieren viel, unscharfe kaum.
+   * Ergebnis 0 (scharf) … 1 (sehr unscharf); null, wenn die Seite zu wenig Struktur hat (z. B. leer).
+   */
+  function blurScore(src, maxDim = 1400) {
+    const c = draw(src, maxDim);
+    const w = c.width, h = c.height;
+    const d = ctx(c).getImageData(0, 0, w, h).data;
+    release(c);
+    // nur der innere Bereich (Ränder/Zuschnittkanten nicht mitzählen)
+    const x0 = Math.round(w * 0.06), x1 = Math.round(w * 0.94), y0 = Math.round(h * 0.06), y1 = Math.round(h * 0.94);
+    const n = w * h;
+    const G = new Float32Array(n);
+    for (let i = 0; i < n; i++) G[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+    // leicht entrauschen (3×3), damit Sensorrauschen nicht als „Schärfe“ zählt
+    const F = blur(G, w, h, 1);
+    const Bh = boxPass(F, w, h, 4, true), Bv = boxPass(F, w, h, 4, false);
+    let sFh = 0, sVh = 0, sFv = 0, sVv = 0;
+    for (let y = y0 + 1; y < y1; y++) {
+      for (let x = x0 + 1; x < x1; x++) {
+        const i = y * w + x;
+        const dFh = Math.abs(F[i] - F[i - 1]), dBh = Math.abs(Bh[i] - Bh[i - 1]);
+        const dFv = Math.abs(F[i] - F[i - w]), dBv = Math.abs(Bv[i] - Bv[i - w]);
+        // Rauschen (kleine Sprünge) ignorieren, sonst wirkt jedes verrauschte Foto „scharf“
+        if (dFh > 4) { sFh += dFh; sVh += Math.max(0, dFh - dBh); }
+        if (dFv > 4) { sFv += dFv; sVv += Math.max(0, dFv - dBv); }
+      }
+    }
+    const area = (x1 - x0) * (y1 - y0);
+    if ((sFh + sFv) / area < 1.2) return null; // kaum Struktur → keine Aussage
+    const bh = sFh ? (sFh - sVh) / sFh : 0, bv = sFv ? (sFv - sVv) / sFv : 0;
+    return Math.max(bh, bv);
+  }
+
+  /**
    * Komplette Seitenverarbeitung (Hauptthread oder Worker):
    * Original laden → drehen → ggf. Ränder erkennen → entzerren → Filter → JPEG + Vorschaubild.
    */
@@ -1080,11 +1115,14 @@ const Img = (() => {
       const t = trimEdges(c);
       if (t !== c) { release(c); c = t; }
     }
+    // Schärfe auf dem entzerrten Foto messen (vor dem Filter, der Kontraste verändert)
+    let blur = null;
+    try { blur = blurScore(c); } catch (e) { blur = null; }
     filter(c, mode);
     const processed = await toBlob(c, 'image/jpeg', 0.9);
     const t = draw(c, 420);
     const thumb = await toBlob(t, 'image/jpeg', 0.8);
-    const res = { processed, thumb, pw: c.width, ph: c.height, corners };
+    const res = { processed, thumb, pw: c.width, ph: c.height, corners, blur };
     release(t); release(c);
     return res;
   }
@@ -1093,7 +1131,7 @@ const Img = (() => {
   const lastFrame = () => fastCanvas;
 
   // interne Bausteine für Tests
-  const _internals = { CFG, prepareEdges, houghLines, lineQuads, scoreQuad, sideMetrics, regionStats, statDist, expandSides, intersect };
+  const _internals = { blurScore, CFG, prepareEdges, houghLines, lineQuads, scoreQuad, sideMetrics, regionStats, statDist, expandSides, intersect };
 
-  return { _internals, FULL, canvas, release, load, draw, toBlob, lastFrame, rotate, rotateCornersCW, isFull, isConvex, warp, filter, detect, processPage };
+  return { _internals, blurScore, FULL, canvas, release, load, draw, toBlob, lastFrame, rotate, rotateCornersCW, isFull, isConvex, warp, filter, detect, processPage };
 })();
