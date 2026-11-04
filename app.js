@@ -25,26 +25,52 @@
   const saveSettings = () => { try { localStorage.setItem('dokscan.settings', JSON.stringify(settings)); } catch { /* egal */ } };
 
   // ---------- Speicher (IndexedDB, optional) ----------
+  // Stores: "docs" (Dokumente der Ablage) und "pages" (Seiten, Index docId)
+  const LEGACY_DOC = 'doc-legacy';
   const DB = (() => {
     let dbp = null;
     const open = () => {
       if (!dbp) {
         dbp = new Promise((resolve, reject) => {
-          const r = indexedDB.open('dokscan', 1);
-          r.onupgradeneeded = () => r.result.createObjectStore('pages', { keyPath: 'id' });
+          const r = indexedDB.open('dokscan', 2);
+          r.onupgradeneeded = (e) => {
+            const db = r.result;
+            const tx = r.transaction;
+            const pagesStore = e.oldVersion < 1 ? db.createObjectStore('pages', { keyPath: 'id' }) : tx.objectStore('pages');
+            if (e.oldVersion < 2) {
+              const docs = db.createObjectStore('docs', { keyPath: 'id' });
+              pagesStore.createIndex('docId', 'docId');
+              // Bisherige Seiten (aus der Version ohne Ablage) in ein Dokument übernehmen
+              let count = 0, first = Infinity;
+              pagesStore.openCursor().onsuccess = (ev) => {
+                const cur = ev.target.result;
+                if (cur) {
+                  const v = cur.value;
+                  v.docId = LEGACY_DOC;
+                  if (v.created < first) first = v.created;
+                  count++;
+                  cur.update(v);
+                  cur.continue();
+                } else if (count) {
+                  const t = isFinite(first) ? first : Date.now();
+                  docs.put({ id: LEGACY_DOC, name: docDefaultName(t), created: t, updated: Date.now(), pageCount: count, thumb: null, text: '', named: false });
+                }
+              };
+            }
+          };
           r.onsuccess = () => resolve(r.result);
           r.onerror = () => reject(r.error);
         }).catch(() => null);
       }
       return dbp;
     };
-    const run = async (mode, fn) => {
+    const run = async (store, mode, fn) => {
       try {
         const db = await open();
         if (!db) return undefined;
         return await new Promise((resolve, reject) => {
-          const t = db.transaction('pages', mode);
-          const req = fn(t.objectStore('pages'));
+          const t = db.transaction(store, mode);
+          const req = fn(t.objectStore(store));
           t.oncomplete = () => resolve(req && req.result);
           t.onerror = () => reject(t.error);
           t.onabort = () => reject(t.error);
@@ -52,25 +78,303 @@
       } catch (e) { console.warn('Speichern nicht möglich', e); return undefined; }
     };
     return {
-      all: () => run('readonly', (s) => s.getAll()),
-      put: (rec) => run('readwrite', (s) => s.put(rec)),
-      del: (id) => run('readwrite', (s) => s.delete(id)),
-      clear: () => run('readwrite', (s) => s.clear()),
+      pagesOf: (docId) => run('pages', 'readonly', (s) => s.index('docId').getAll(docId)),
+      put: (rec) => run('pages', 'readwrite', (s) => s.put(rec)),
+      del: (id) => run('pages', 'readwrite', (s) => s.delete(id)),
+      delPagesOf: (docId) => run('pages', 'readwrite', (s) => {
+        s.index('docId').openKeyCursor(IDBKeyRange.only(docId)).onsuccess = (ev) => {
+          const cur = ev.target.result;
+          if (cur) { s.delete(cur.primaryKey); cur.continue(); }
+        };
+      }),
+      docs: () => run('docs', 'readonly', (s) => s.getAll()),
+      putDoc: (doc) => run('docs', 'readwrite', (s) => s.put(doc)),
+      delDoc: (id) => run('docs', 'readwrite', (s) => s.delete(id)),
     };
   })();
+
+  function docDefaultName(t) {
+    const d = new Date(t);
+    const p = (n) => String(n).padStart(2, '0');
+    return `Scan ${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
 
   // ---------- Zustand ----------
   /** @type {Array<any>} */
   let pages = [];
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
-  const record = (p, order) => ({
-    id: p.id, order, created: p.created, original: p.original,
+  const record = (p) => ({
+    id: p.id, docId: p.docId, order: p.order, created: p.created, original: p.original,
     rotation: p.rotation, corners: p.corners, filter: p.filter, autoDetect: !!(p.autoDetect && !p.processed),
     processed: p.processed, pw: p.pw, ph: p.ph, thumb: p.thumb, procKey: p.procKey, ocr: p.ocr,
   });
-  const persist = (p) => { const i = pages.indexOf(p); if (i >= 0) DB.put(record(p, i)); };
-  const persistAll = () => pages.forEach(persist);
+  const persist = (p) => {
+    if (p.deleted || !p.docId) return;
+    DB.put(record(p));
+    touchDoc(p.docId);
+  };
+  /** Reihenfolge der Seiten des offenen Dokuments übernehmen und speichern. */
+  const persistAll = () => pages.forEach((p, i) => { p.order = i; persist(p); });
+
+  // ---------- Ablage (Dokumente) ----------
+  let docs = [];            // Metadaten aller Dokumente
+  let currentDoc = null;    // geöffnetes Dokument (oder das, in das gerade gescannt wird)
+
+  function newDoc() {
+    const t = Date.now();
+    const d = { id: 'doc-' + uid(), name: docDefaultName(t), created: t, updated: t, pageCount: 0, thumb: null, text: '', named: false };
+    docs.push(d);
+    DB.putDoc(d);
+    return d;
+  }
+
+  const docTimers = new Map();
+  /** Metadaten (Seitenzahl, Vorschau, Suchtext) eines Dokuments verzögert aktualisieren. */
+  function touchDoc(docId) {
+    clearTimeout(docTimers.get(docId));
+    docTimers.set(docId, setTimeout(() => { docTimers.delete(docId); refreshDocMeta(docId); }, 400));
+  }
+  async function refreshDocMeta(docId) {
+    const d = docs.find((x) => x.id === docId);
+    if (!d) return;
+    let list;
+    if (currentDoc && currentDoc.id === docId) list = pages;
+    else list = ((await DB.pagesOf(docId)) || []).map((r) => inflight.get(r.id) || r).sort((a, b) => a.order - b.order);
+    list = list.filter((p) => !p.deleted);
+    d.pageCount = list.length;
+    d.thumb = (list[0] && list[0].thumb) || null;
+    d.text = list.map((p) => (p.ocr && p.ocr.text) || '').filter(Boolean).join('\n\n');
+    d.updated = Date.now();
+    if (docs.includes(d)) DB.putDoc(d);
+    renderLibrary();
+    if (currentDoc === d) renderDocHeader();
+  }
+
+  const norm = (s) => (s || '').toLowerCase().replace(/ß/g, 'ss').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  function fmtDate(t) {
+    const d = new Date(t), now = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    const time = `${p(d.getHours())}:${p(d.getMinutes())}`;
+    if (d.toDateString() === now.toDateString()) return `heute, ${time}`;
+    const y = new Date(now); y.setDate(now.getDate() - 1);
+    if (d.toDateString() === y.toDateString()) return `gestern, ${time}`;
+    return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`;
+  }
+  /** Text mit hervorgehobenem Suchbegriff als DOM-Knoten (kein innerHTML). */
+  function highlight(el, text, q) {
+    el.textContent = '';
+    if (!q) { el.textContent = text; return; }
+    const nt = norm(text);
+    let i = 0;
+    // norm() verändert die Länge nur bei ß – für die Anzeige ausreichend genau
+    for (;;) {
+      const j = nt.indexOf(q, i);
+      if (j < 0 || nt.length !== text.length) { el.append(text.slice(i)); break; }
+      el.append(text.slice(i, j));
+      const m = document.createElement('mark');
+      m.textContent = text.slice(j, j + q.length);
+      el.append(m);
+      i = j + q.length;
+    }
+  }
+  function snippet(text, q) {
+    const nt = norm(text);
+    const j = nt.indexOf(q);
+    if (j < 0) return '';
+    const a = Math.max(0, j - 40), b = Math.min(text.length, j + q.length + 60);
+    return (a > 0 ? '… ' : '') + text.slice(a, b).replace(/\s+/g, ' ').trim() + (b < text.length ? ' …' : '');
+  }
+
+  const docList = $('#docList');
+  const libThumbs = new Map(); // docId → { blob, url }
+  function renderLibrary() {
+    const q = norm($('#libSearch').value.trim());
+    const sorted = docs.slice().sort((a, b) => b.updated - a.updated);
+    docList.textContent = '';
+    let shown = 0;
+    for (const d of sorted) {
+      let snip = '';
+      if (q) {
+        const inName = norm(d.name).includes(q);
+        snip = snippet(d.text || '', q);
+        if (!inName && !snip) continue;
+      }
+      shown++;
+      const li = document.createElement('li');
+      li.className = 'doc-item';
+      li.dataset.id = d.id;
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'doc-open';
+      let thumbEl;
+      if (d.thumb) {
+        let t = libThumbs.get(d.id);
+        if (!t || t.blob !== d.thumb) {
+          if (t) URL.revokeObjectURL(t.url);
+          t = { blob: d.thumb, url: URL.createObjectURL(d.thumb) };
+          libThumbs.set(d.id, t);
+        }
+        thumbEl = document.createElement('img');
+        thumbEl.src = t.url;
+        thumbEl.alt = '';
+      } else {
+        thumbEl = document.createElement('span');
+        thumbEl.innerHTML = '<svg class="ic"><use href="#i-pdf"/></svg>';
+      }
+      thumbEl.classList.add('doc-thumb');
+      const meta = document.createElement('span');
+      meta.className = 'doc-meta';
+      const name = document.createElement('b');
+      highlight(name, d.name, q);
+      const info = document.createElement('span');
+      info.className = 'muted';
+      info.textContent = `${d.pageCount === 1 ? '1 Seite' : `${d.pageCount} Seiten`} · ${fmtDate(d.updated)}`;
+      meta.append(name, info);
+      if (snip) {
+        const sn = document.createElement('span');
+        sn.className = 'doc-snippet';
+        highlight(sn, snip, q);
+        meta.append(sn);
+      }
+      open.append(thumbEl, meta);
+      open.setAttribute('aria-label', `${d.name} öffnen`);
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'icon-btn doc-more';
+      more.setAttribute('aria-label', `Aktionen für ${d.name}`);
+      more.innerHTML = '<svg class="ic"><use href="#i-dots"/></svg>';
+      li.append(open, more);
+      docList.appendChild(li);
+    }
+    for (const [id, t] of libThumbs) if (!docs.some((d) => d.id === id)) { URL.revokeObjectURL(t.url); libThumbs.delete(id); }
+    const n = docs.length;
+    $('#empty').hidden = n > 0;
+    $('#libSearchWrap').hidden = n === 0;
+    $('#libNoHits').hidden = !(n && q && !shown);
+    $('#libInfo').textContent = n === 0 ? 'Keine Dokumente' : n === 1 ? '1 Dokument' : `${n} Dokumente`;
+  }
+
+  function renderDocHeader() {
+    const d = currentDoc;
+    $('#docName').textContent = d ? d.name : 'Neues Dokument';
+    const n = pages.length;
+    $('#docInfo').textContent = n === 0 ? 'Keine Seiten' : n === 1 ? '1 Seite' : `${n} Seiten`;
+  }
+
+  /** Dokument öffnen (Seiten aus dem Speicher laden) und Dokumentansicht zeigen. */
+  async function openDoc(d) {
+    if (currentDoc !== d || !pages.length) {
+      pages.forEach(dropUrls);
+      currentDoc = d;
+      const recs = ((await DB.pagesOf(d.id)) || []).sort((a, b) => a.order - b.order);
+      pages = recs.map((r) => inflight.get(r.id) || { ...r, pending: false, error: false }).filter((p) => !p.deleted);
+    }
+    renderGrid();
+    $('#overview').scrollTop = 0;
+    if (topScreen() !== 'docview') openScreen('docview');
+    pages.filter((p) => (!p.processed || !p.thumb) && !p.pending).forEach(schedule);
+    if (settings.ocr) pages.forEach((p) => { if (p.processed && p.procKey && !(p.ocr && p.ocr.key === p.procKey)) ensureOcr(p).catch(() => {}); });
+  }
+
+  function onDocClosed() {
+    pages.forEach(dropUrls);
+    pages = [];
+    currentDoc = null;
+    renderLibrary();
+  }
+
+  async function deleteDoc(d) {
+    const n = d.pageCount;
+    if (!confirm(`„${d.name}“${n ? ` mit ${n === 1 ? '1 Seite' : `${n} Seiten`}` : ''} löschen?`)) return false;
+    docs = docs.filter((x) => x !== d);
+    for (const p of inflight.values()) if (p.docId === d.id) p.deleted = true;
+    if (currentDoc === d) pages.forEach((p) => { p.deleted = true; });
+    await DB.delPagesOf(d.id);
+    await DB.delDoc(d.id);
+    if (currentDoc === d && topScreen() === 'docview') closeScreen();
+    renderLibrary();
+    return true;
+  }
+
+  // Umbenennen (mit Vorschlägen aus dem erkannten Text)
+  const nameDialog = $('#nameDialog');
+  let renaming = null;
+  function nameSuggestions(text) {
+    const out = [];
+    for (const raw of (text || '').split(/\n+/)) {
+      const l = raw.replace(/\s+/g, ' ').trim();
+      if (l.length < 4 || l.length > 60) continue;
+      const letters = (l.match(/[A-Za-zÄÖÜäöüß]/g) || []).length;
+      if (letters / l.length < 0.5) continue;
+      if (!out.includes(l)) out.push(l);
+      if (out.length >= 3) break;
+    }
+    return out;
+  }
+  function showRename(d) {
+    renaming = d;
+    $('#nameInput').value = d.name;
+    const sug = nameSuggestions(d.text);
+    const box = $('#nameSuggest');
+    box.textContent = '';
+    for (const s of sug) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip';
+      b.textContent = s;
+      b.addEventListener('click', () => { $('#nameInput').value = s; $('#nameInput').focus(); });
+      box.appendChild(b);
+    }
+    $('#nameSuggestWrap').hidden = !sug.length;
+    nameDialog.showModal();
+    setTimeout(() => { $('#nameInput').focus(); $('#nameInput').select(); }, 50);
+  }
+  function saveRename() {
+    const d = renaming;
+    if (!d) return;
+    const v = $('#nameInput').value.replace(/\s+/g, ' ').trim();
+    d.name = v || docDefaultName(d.created);
+    d.named = !!v;
+    d.updated = Date.now();
+    DB.putDoc(d);
+    nameDialog.close();
+    renaming = null;
+    renderLibrary();
+    if (currentDoc === d) renderDocHeader();
+  }
+  $('#nameSave').addEventListener('click', saveRename);
+  $('#nameForm').addEventListener('submit', (e) => { if (e.submitter && e.submitter.value === 'close') return; e.preventDefault(); saveRename(); });
+  nameDialog.addEventListener('click', (e) => { if (e.target === nameDialog) nameDialog.close(); });
+
+  // Aktionen aus der Ablage
+  const docMenu = $('#docMenu');
+  let menuDoc = null;
+  docList.addEventListener('click', (e) => {
+    const li = e.target.closest('.doc-item');
+    if (!li) return;
+    const d = docs.find((x) => x.id === li.dataset.id);
+    if (!d) return;
+    if (e.target.closest('.doc-more')) {
+      menuDoc = d;
+      $('#docMenuTitle').textContent = d.name;
+      docMenu.showModal();
+    } else if (e.target.closest('.doc-open')) {
+      openDoc(d);
+    }
+  });
+  docMenu.addEventListener('click', (e) => { if (e.target === docMenu) docMenu.close(); });
+  $('#menuOpen').addEventListener('click', () => { docMenu.close(); openDoc(menuDoc); });
+  $('#menuPdf').addEventListener('click', async () => { docMenu.close(); await openDoc(menuDoc); openPdf(false); });
+  $('#menuRename').addEventListener('click', () => { docMenu.close(); showRename(menuDoc); });
+  $('#menuDelete').addEventListener('click', async () => { docMenu.close(); await deleteDoc(menuDoc); });
+  $('#libSearch').addEventListener('input', renderLibrary);
+  $('#docBack').addEventListener('click', () => closeScreen());
+  $('#docTitle').addEventListener('click', () => { if (currentDoc) showRename(currentDoc); });
+  $('#docDelete').addEventListener('click', () => {
+    if (currentDoc) deleteDoc(currentDoc);
+    else closeScreen();
+  });
 
   function urlFor(p, key) {
     const blob = p[key];
@@ -101,9 +405,14 @@
   }
   const tick = () => new Promise((r) => setTimeout(r, 0));
 
+  // Seiten, die gerade verarbeitet/erkannt werden – beim erneuten Öffnen dasselbe Objekt verwenden
+  const inflight = new Map();
+  const releaseInflight = (p) => { if (!p.pending && !p.ocrJob) inflight.delete(p.id); };
+
   function schedule(p) {
     p.rev = (p.rev || 0) + 1;
     p.pending = true;
+    inflight.set(p.id, p);
     if (!queue.includes(p)) queue.push(p);
     renderCard(p);
     if (editor.page === p) updatePreview();
@@ -115,7 +424,7 @@
     busy = true;
     while (queue.length) {
       const p = queue.shift();
-      if (!pages.includes(p)) continue;
+      if (p.deleted) { inflight.delete(p.id); continue; }
       const rev = p.rev;
       await tick();
       try {
@@ -130,6 +439,7 @@
       renderCard(p);
       if (editor.page === p) updatePreview();
       persist(p);
+      releaseInflight(p);
     }
     busy = false;
     idleWaiters.splice(0).forEach((r) => r());
@@ -200,7 +510,8 @@
   function addOriginal(original, hint) {
     // Ränder: vorläufig aus der Live-Erkennung, genau erkannt wird im Hintergrund auf dem vollen Bild
     const corners = (settings.autoCrop && hint) || Img.FULL.map((x) => x.slice());
-    const p = { id: uid(), created: Date.now(), original, rotation: 0, corners, filter: settings.filter, processed: null, thumb: null, autoDetect: settings.autoCrop };
+    if (!currentDoc) currentDoc = newDoc();
+    const p = { id: uid(), docId: currentDoc.id, order: pages.length, created: Date.now(), original, rotation: 0, corners, filter: settings.filter, processed: null, thumb: null, autoDetect: settings.autoCrop };
     pages.push(p);
     renderGrid();
     persist(p);
@@ -243,8 +554,9 @@
       const ocr = { key, text: res.text, words: res.words };
       if (p.procKey === key) { p.ocr = ocr; persist(p); }
       return ocr;
-    }).finally(() => { if (p.ocrJob && p.ocrJob.key === key) p.ocrJob = null; });
+    }).finally(() => { if (p.ocrJob && p.ocrJob.key === key) p.ocrJob = null; releaseInflight(p); });
     p.ocrJob = { key, promise, listeners };
+    inflight.set(p.id, p);
     return promise;
   }
 
@@ -281,11 +593,10 @@
     grid.textContent = '';
     pages.forEach((p, i) => grid.appendChild(makeCard(p, i)));
     const n = pages.length;
-    $('#empty').hidden = n > 0;
+    $('#docEmpty').hidden = n > 0;
     $('#gridHint').hidden = n < 2;
     $('#btnPdf').disabled = n === 0;
-    $('#btnNew').hidden = n === 0;
-    $('#docInfo').textContent = n === 0 ? 'Keine Seiten' : n === 1 ? '1 Seite' : `${n} Seiten`;
+    renderDocHeader();
   }
 
   function makeCard(p, i) {
@@ -370,30 +681,32 @@
   });
 
   // ---------- Bildschirme & Zurück-Taste ----------
-  let screen = null;
+  // Ansichten liegen als Stapel übereinander: Ablage → Dokument → Editor/Kamera
+  const stack = [];
+  const topScreen = () => stack[stack.length - 1] || null;
   function openScreen(name) {
-    if (screen) closeScreenNow(screen);
-    screen = name;
+    if (stack.includes(name)) return;
+    stack.push(name);
     $('#' + name).hidden = false;
     document.body.classList.add('screen-open');
-    try { history.pushState({ screen: name }, ''); } catch { /* egal */ }
+    try { history.pushState({ dokscan: stack.length }, ''); } catch { /* egal */ }
   }
   function closeScreen() {
-    if (!screen) return;
-    if (history.state && history.state.screen === screen) history.back();
-    else { const s = screen; screen = null; closeScreenNow(s); }
+    if (!stack.length) return;
+    if (history.state && history.state.dokscan === stack.length) history.back();
+    else popScreen();
   }
-  function closeScreenNow(name) {
+  function popScreen() {
+    const name = stack.pop();
     $('#' + name).hidden = true;
-    document.body.classList.remove('screen-open');
+    if (!stack.length) document.body.classList.remove('screen-open');
     if (name === 'camera') onCameraClosed();
     if (name === 'editor') onEditorClosed();
+    if (name === 'docview') onDocClosed();
   }
-  window.addEventListener('popstate', () => {
-    if (!screen) return;
-    const s = screen;
-    screen = null;
-    closeScreenNow(s);
+  window.addEventListener('popstate', (e) => {
+    const depth = (e.state && e.state.dokscan) || 0;
+    while (stack.length > depth) popScreen();
   });
 
   // ---------- Kamera ----------
@@ -573,7 +886,7 @@
         : 'Die Kamera konnte nicht gestartet werden. Du kannst stattdessen die Kamera-App verwenden.', true);
       return;
     }
-    if (screen !== 'camera') { stopStream(); return; }
+    if (topScreen() !== 'camera') { stopStream(); return; }
     cam.track = cam.stream.getVideoTracks()[0];
     video.srcObject = cam.stream;
     try { await video.play(); } catch { /* autoplay */ }
@@ -706,7 +1019,10 @@
     video.srcObject = null;
   }
 
-  function openCamera() {
+  /** Kamera öffnen; fromLibrary = neues Dokument anlegen (erst beim ersten Foto). */
+  function openCamera(fromLibrary) {
+    cam.newDoc = !!fromLibrary;
+    if (cam.newDoc) { pages.forEach(dropUrls); pages = []; currentDoc = null; renderGrid(); }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       $('#fileCapture').click();
       return;
@@ -721,8 +1037,17 @@
   function onCameraClosed() {
     stopStream();
     const auto = cam.done && cam.added > 0 && settings.autoPdf;
+    const fromLibrary = cam.newDoc;
+    cam.newDoc = false;
     cam.added = 0;
-    if (auto) setTimeout(() => openPdf(true), 50);
+    // nach dem Popstate ausführen, damit die neue Ansicht nicht gleich wieder geschlossen wird
+    setTimeout(async () => {
+      if (fromLibrary) {
+        if (!currentDoc) return;
+        await openDoc(currentDoc);
+      }
+      if (auto) openPdf(true);
+    }, 50);
   }
 
   async function shoot() {
@@ -768,7 +1093,8 @@
     }
   }
 
-  $('#btnScan').addEventListener('click', openCamera);
+  $('#btnScan').addEventListener('click', () => openCamera(false));
+  $('#libScan').addEventListener('click', () => openCamera(true));
   $('#camShutter').addEventListener('click', shoot);
   $('#camClose').addEventListener('click', () => { cam.done = false; closeScreen(); });
   $('#camDone').addEventListener('click', () => { cam.done = true; closeScreen(); });
@@ -783,21 +1109,32 @@
     } catch { cam.torch = false; toast('Licht wird nicht unterstützt.'); }
   });
   document.addEventListener('keydown', (e) => {
-    if (screen === 'camera' && (e.code === 'Space' || e.code === 'Enter') && !e.repeat) { e.preventDefault(); shoot(); }
+    if (topScreen() === 'camera' && (e.code === 'Space' || e.code === 'Enter') && !e.repeat) { e.preventDefault(); shoot(); }
   });
   document.addEventListener('visibilitychange', () => {
-    if (screen !== 'camera') return;
+    if (topScreen() !== 'camera') return;
     if (document.hidden) stopStream(); else startStream();
   });
 
+  // Importieren: aus der Ablage → neues Dokument, aus einem Dokument → anhängen
+  let importNewDoc = false;
+  async function importInto(files, newDocument) {
+    if (!files || !files.length) return 0;
+    if (newDocument) { pages.forEach(dropUrls); pages = []; currentDoc = null; }
+    const n = await addFiles(files);
+    if (n && newDocument && currentDoc) await openDoc(currentDoc);
+    return n;
+  }
   $('#fileCapture').addEventListener('change', async (e) => {
-    const n = await addFiles(e.target.files);
+    const n = await importInto(e.target.files, cam.newDoc);
+    cam.newDoc = false;
     e.target.value = '';
     if (n) toast('Seite hinzugefügt. Tippe auf „Scannen“ für die nächste.');
   });
-  $('#btnImport').addEventListener('click', () => $('#fileImport').click());
+  $('#btnImport').addEventListener('click', () => { importNewDoc = false; $('#fileImport').click(); });
+  $('#libImport').addEventListener('click', () => { importNewDoc = true; $('#fileImport').click(); });
   $('#fileImport').addEventListener('change', async (e) => {
-    const n = await addFiles(e.target.files);
+    const n = await importInto(e.target.files, importNewDoc);
     e.target.value = '';
     if (n) toast(n === 1 ? '1 Bild importiert.' : `${n} Bilder importiert.`);
   });
@@ -927,8 +1264,10 @@
     const p = editor.page;
     if (!p || !confirm(`Seite ${pages.indexOf(p) + 1} löschen?`)) return;
     pages = pages.filter((x) => x !== p);
+    p.deleted = true;
     DB.del(p.id);
     persistAll();
+    touchDoc(p.docId);
     dropUrls(p);
     renderGrid();
     closeScreen();
@@ -1128,7 +1467,7 @@
   function openPdf(auto) {
     if (!pages.length) return;
     resetPdfResult();
-    $('#pdfName').value = defaultName();
+    $('#pdfName').value = currentDoc ? currentDoc.name.replace(/:/g, '-') : defaultName();
     setRadio('format', settings.format);
     setRadio('quality', settings.quality);
     $('#pdfOcr').checked = settings.ocr;
@@ -1267,7 +1606,6 @@
     $('#setWideFov').checked = settings.wideFov;
     $('#setAutoShoot').checked = settings.autoShoot;
     $('#setOcr').checked = settings.ocr;
-    $('#setClear').disabled = pages.length === 0;
     setDialog.showModal();
   });
   $('#setAutoCrop').addEventListener('change', (e) => { settings.autoCrop = e.target.checked; saveSettings(); });
@@ -1281,18 +1619,6 @@
   });
   setDialog.addEventListener('click', (e) => { if (e.target === setDialog) setDialog.close(); });
 
-  async function clearAll() {
-    if (!pages.length) return false;
-    if (!confirm(`Alle ${pages.length} Seiten löschen und ein neues Dokument beginnen?`)) return false;
-    pages.forEach(dropUrls);
-    pages = [];
-    queue.length = 0;
-    await DB.clear();
-    renderGrid();
-    return true;
-  }
-  $('#setClear').addEventListener('click', async () => { if (await clearAll()) setDialog.close(); });
-  $('#btnNew').addEventListener('click', clearAll);
 
   // ---------- Toast ----------
   let toastTimer = null;
@@ -1305,25 +1631,25 @@
   }
 
   // Bilder per Drag & Drop (Desktop)
-  document.addEventListener('dragover', (e) => { if (!screen) e.preventDefault(); });
+  const dropTarget = () => (!stack.length ? 'library' : topScreen() === 'docview' ? 'doc' : null);
+  document.addEventListener('dragover', (e) => { if (dropTarget()) e.preventDefault(); });
   document.addEventListener('drop', async (e) => {
-    if (screen || !e.dataTransfer || !e.dataTransfer.files.length) return;
+    const target = dropTarget();
+    if (!target || !e.dataTransfer || !e.dataTransfer.files.length) return;
     e.preventDefault();
-    const n = await addFiles(e.dataTransfer.files);
+    const n = await importInto(e.dataTransfer.files, target === 'library');
     if (n) toast(n === 1 ? '1 Bild importiert.' : `${n} Bilder importiert.`);
   });
 
   // ---------- Start ----------
   async function init() {
     Proc.init();
-    renderGrid();
-    const recs = await DB.all();
-    if (Array.isArray(recs) && recs.length) {
-      recs.sort((a, b) => a.order - b.order);
-      pages = recs.map((r) => ({ ...r, pending: false, error: false }));
-      renderGrid();
-      pages.filter((p) => !p.processed || !p.thumb).forEach(schedule);
-    }
+    renderLibrary();
+    docs = (await DB.docs()) || [];
+    // Altlast: Seiten-Metadaten des übernommenen Dokuments einmal nachziehen
+    const legacy = docs.find((d) => d.id === LEGACY_DOC);
+    if (legacy && !legacy.thumb) refreshDocMeta(LEGACY_DOC);
+    renderLibrary();
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
       // Neue Version aktiv → neu laden, sobald nichts offen ist (Seiten sind gespeichert)
       const hadController = !!navigator.serviceWorker.controller;
@@ -1331,7 +1657,7 @@
       navigator.serviceWorker.addEventListener('controllerchange', () => {
         if (!hadController || reloading) return;
         const tryReload = () => {
-          if (screen || pdfDialog.open || setDialog.open || textDialog.open || !isIdle()) { setTimeout(tryReload, 2000); return; }
+          if (stack.length || pdfDialog.open || setDialog.open || textDialog.open || nameDialog.open || docMenu.open || !isIdle()) { setTimeout(tryReload, 2000); return; }
           reloading = true;
           location.reload();
         };
@@ -1343,5 +1669,5 @@
   init();
 
   // Für Tests
-  window.DokScan = { get pages() { return pages; }, whenIdle, addFiles, buildPdf, settings, workerReady: () => Proc.init(), ensureOcr };
+  window.DokScan = { get pages() { return pages; }, get docs() { return docs; }, get currentDoc() { return currentDoc; }, whenIdle, addFiles, buildPdf, settings, workerReady: () => Proc.init(), ensureOcr, openDoc, importInto };
 })();

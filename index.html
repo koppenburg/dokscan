@@ -41,6 +41,9 @@
     <symbol id="i-switch" viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><path d="M9 13a3 3 0 0 1 5.2-2"/><path d="M15 13a3 3 0 0 1-5.2 2"/><path d="M14.5 9v2.2h-2.2M9.5 17v-2.2h2.2"/></symbol>
     <symbol id="i-text" viewBox="0 0 24 24"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+    <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+    <symbol id="i-dots" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3.4"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   </defs>
 </svg>
@@ -49,13 +52,16 @@
   <header class="topbar">
     <div class="brand">
       <h1>DokScan</h1>
-      <p id="docInfo" class="muted">Keine Seiten</p>
+      <p id="libInfo" class="muted">Keine Dokumente</p>
     </div>
-    <button id="btnNew" class="icon-btn" type="button" aria-label="Neues Dokument" title="Neues Dokument" hidden><svg class="ic"><use href="#i-new"/></svg></button>
     <button id="btnSettings" class="icon-btn" type="button" aria-label="Einstellungen" title="Einstellungen"><svg class="ic"><use href="#i-sliders"/></svg></button>
   </header>
+  <div id="libSearchWrap" class="lib-search" hidden>
+    <svg class="ic"><use href="#i-search"/></svg>
+    <input id="libSearch" type="search" placeholder="Dokumente und Text durchsuchen …" autocomplete="off" aria-label="Dokumente durchsuchen">
+  </div>
 
-  <main id="overview">
+  <main id="library">
     <section id="empty" class="empty">
       <div class="empty-art" aria-hidden="true">
         <div class="sheet s1"></div><div class="sheet s2"></div><div class="sheet s3"><span></span><span></span><span></span><span></span></div>
@@ -66,18 +72,40 @@
         <li><span><b>Prüfen</b><br>Zuschnitt, Drehung und Filter anpassen</span></li>
         <li><span><b>PDF</b><br>wird automatisch zusammengefügt – teilen oder speichern</span></li>
       </ol>
-      <p class="muted small">Alles passiert auf deinem Gerät. Es werden keine Bilder hochgeladen.</p>
+      <p class="muted small">Jeder Scan wird als eigenes Dokument in der Ablage gespeichert – nur auf deinem Gerät.</p>
     </section>
-    <ol id="pageGrid" class="grid" aria-label="Seiten"></ol>
-    <p id="gridHint" class="muted small hint" hidden>Tippe auf eine Seite zum Bearbeiten · Halte <svg class="ic ic-inline"><use href="#i-grip"/></svg> gedrückt und ziehe, um die Reihenfolge zu ändern.</p>
+    <p id="libNoHits" class="muted center no-hits" hidden>Keine Treffer.</p>
+    <ul id="docList" class="doc-list" aria-label="Dokumente"></ul>
   </main>
 
   <footer class="bottombar">
-    <button id="btnImport" class="bar-btn" type="button"><svg class="ic"><use href="#i-image"/></svg><span>Importieren</span></button>
-    <button id="btnScan" class="scan-btn" type="button" aria-label="Scannen"><svg class="ic"><use href="#i-camera"/></svg></button>
-    <button id="btnPdf" class="bar-btn" type="button" disabled><svg class="ic"><use href="#i-pdf"/></svg><span>PDF</span></button>
+    <button id="libImport" class="bar-btn" type="button"><svg class="ic"><use href="#i-image"/></svg><span>Importieren</span></button>
+    <button id="libScan" class="scan-btn" type="button" aria-label="Neues Dokument scannen"><svg class="ic"><use href="#i-camera"/></svg></button>
+    <span class="bar-spacer" aria-hidden="true"></span>
   </footer>
 </div>
+
+<!-- Dokument -->
+<section id="docview" class="screen docview" hidden aria-label="Dokument">
+  <header class="topbar doc-top">
+    <button id="docBack" class="icon-btn" type="button" aria-label="Zur Ablage"><svg class="ic"><use href="#i-left"/></svg></button>
+    <button id="docTitle" class="doc-title" type="button" aria-label="Dokument umbenennen">
+      <span class="doc-name-row"><span id="docName">Dokument</span><svg class="ic ic-sm"><use href="#i-pencil"/></svg></span>
+      <span id="docInfo" class="muted small">Keine Seiten</span>
+    </button>
+    <button id="docDelete" class="icon-btn danger" type="button" aria-label="Dokument löschen" title="Dokument löschen"><svg class="ic"><use href="#i-trash"/></svg></button>
+  </header>
+  <main id="overview">
+    <p id="docEmpty" class="muted center doc-empty" hidden>Noch keine Seiten. Tippe auf <b>Scannen</b> oder <b>Importieren</b>.</p>
+    <ol id="pageGrid" class="grid" aria-label="Seiten"></ol>
+    <p id="gridHint" class="muted small hint" hidden>Tippe auf eine Seite zum Bearbeiten · Halte <svg class="ic ic-inline"><use href="#i-grip"/></svg> gedrückt und ziehe, um die Reihenfolge zu ändern.</p>
+  </main>
+  <footer class="bottombar">
+    <button id="btnImport" class="bar-btn" type="button"><svg class="ic"><use href="#i-image"/></svg><span>Importieren</span></button>
+    <button id="btnScan" class="scan-btn" type="button" aria-label="Seiten scannen"><svg class="ic"><use href="#i-camera"/></svg></button>
+    <button id="btnPdf" class="bar-btn" type="button" disabled><svg class="ic"><use href="#i-pdf"/></svg><span>PDF</span></button>
+  </footer>
+</section>
 
 <input id="fileImport" type="file" accept="image/*" multiple hidden>
 <input id="fileCapture" type="file" accept="image/*" capture="environment" hidden>
@@ -227,6 +255,39 @@
   </form>
 </dialog>
 
+<!-- Umbenennen -->
+<dialog id="nameDialog" class="sheet-dialog" aria-labelledby="nameTitle">
+  <form method="dialog" class="sheet-body" id="nameForm">
+    <header class="sheet-head">
+      <h2 id="nameTitle">Dokument umbenennen</h2>
+      <button class="icon-btn" value="close" aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+    </header>
+    <label class="field">
+      <span>Name</span>
+      <span class="input-suffix"><input id="nameInput" type="text" maxlength="120" autocomplete="off" enterkeyhint="done"></span>
+    </label>
+    <div id="nameSuggestWrap" class="field" hidden>
+      <span>Vorschläge aus dem erkannten Text</span>
+      <div id="nameSuggest" class="chips wrap"></div>
+    </div>
+    <button id="nameSave" class="btn primary wide" type="button"><svg class="ic"><use href="#i-check"/></svg>Speichern</button>
+  </form>
+</dialog>
+
+<!-- Aktionen für ein Dokument -->
+<dialog id="docMenu" class="sheet-dialog" aria-labelledby="docMenuTitle">
+  <form method="dialog" class="sheet-body">
+    <header class="sheet-head">
+      <h2 id="docMenuTitle">Dokument</h2>
+      <button class="icon-btn" value="close" aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+    </header>
+    <button id="menuOpen" class="btn wide menu-btn" type="button"><svg class="ic"><use href="#i-eye"/></svg>Öffnen</button>
+    <button id="menuPdf" class="btn wide menu-btn" type="button"><svg class="ic"><use href="#i-pdf"/></svg>PDF erstellen &amp; teilen</button>
+    <button id="menuRename" class="btn wide menu-btn" type="button"><svg class="ic"><use href="#i-pencil"/></svg>Umbenennen</button>
+    <button id="menuDelete" class="btn wide menu-btn danger" type="button"><svg class="ic"><use href="#i-trash"/></svg>Löschen</button>
+  </form>
+</dialog>
+
 <!-- Einstellungen -->
 <dialog id="settingsDialog" class="sheet-dialog" aria-labelledby="setTitle">
   <form method="dialog" class="sheet-body">
@@ -243,8 +304,7 @@
     <label class="switch"><input id="setWideFov" type="checkbox"><span class="track"></span><span>Weites Sichtfeld<br><span class="muted small">Kamerabild ohne Zuschnitt (empfohlen für iPad), etwas geringere Auflösung</span></span></label>
     <label class="switch"><input id="setOcr" type="checkbox"><span class="track"></span><span>Texterkennung (OCR)<br><span class="muted small">Text wird im Hintergrund erkannt, PDF wird durchsuchbar. Beim ersten Mal werden ca. 9 MB geladen.</span></span></label>
     <label class="switch"><input id="setAutoPdf" type="checkbox"><span class="track"></span><span>Nach dem Scannen automatisch PDF erstellen</span></label>
-    <p class="muted small">Seiten werden nur lokal in diesem Browser gespeichert, bis du ein neues Dokument beginnst.</p>
-    <button id="setClear" class="btn danger wide" type="button"><svg class="ic"><use href="#i-trash"/></svg>Alle Seiten löschen</button>
+    <p class="muted small">Alle Dokumente werden nur lokal in diesem Browser gespeichert.</p>
   </form>
 </dialog>
 
