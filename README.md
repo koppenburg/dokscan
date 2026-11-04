@@ -13,6 +13,7 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
   Ohne Kamerazugriff wird automatisch die Kamera-App des Geräts verwendet.
 - **Import** vorhandener Fotos (Mehrfachauswahl oder Drag & Drop am Desktop).
 - **Automatische Randerkennung**: Schon in der Kamera wird der erkannte Dokumentrand live als Rahmen angezeigt; das Foto wird automatisch zugeschnitten und entzerrt. Kantenbasiert (Geradensuche + Bewertung von Kantenverlauf und Farbunterschied innen/außen), mit Feinjustierung auf dem vollen Foto – robust auch bei Holzmaserung, Mustern, Fliesen und Kopfzeilen. Ecken lassen sich mit Lupe manuell nachziehen. Messung: `tools/edge-benchmark.html`.
+- **Unschärfe-Warnung**: Nach jeder Aufnahme wird die Schärfe gemessen. Wirkt ein Foto unscharf, erscheint direkt in der Kamera „Seite 3 wirkt unscharf – Neu aufnehmen“; zusätzlich Markierung in der Seitenübersicht, Hinweis im Editor und im PDF-Dialog. Abschaltbar in den Einstellungen.
 - **Seite neu aufnehmen**: Im Editor eine unscharfe oder schiefe Seite neu fotografieren – Position und Filter bleiben, „Rückgängig“ stellt das alte Foto wieder her.
 - **Filter:** Dokument (Schatten entfernen, weißes Papier), Original, Graustufen, Schwarz-Weiß.
 - Seiten **drehen, löschen und per Ziehen umsortieren**.
