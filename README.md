@@ -6,6 +6,7 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 
 ## Funktionen
 
+- **Dokumentenablage:** Jeder Scan wird als eigenes Dokument gespeichert (Vorschau, Name, Seitenzahl, Datum). **Suche** über Namen *und* erkannten Text, Umbenennen mit Namensvorschlägen aus dem Text, Löschen, später weitere Seiten ergänzen.
 - **Serienaufnahme** mit der Rückkamera (Live-Vorschau, Auslöser, Licht/Taschenlampe falls verfügbar).
 - **Automatisch auslösen:** Liegt das Dokument ca. 1 Sekunde ruhig im Bild, wird das Foto von selbst gemacht (Fortschrittsring am Auslöser). Danach wartet die App, bis die nächste Seite aufgelegt ist – so entsteht kein Doppelfoto. Ein-/ausschaltbar über „Auto“ in der Kamera.
 - **Zoom & Kamerawahl:** Zoom-Tasten (z. B. 0,5× / 1× / 2×) und Zoomen mit zwei Fingern, Wechsel auf Ultraweitwinkel u. a. – sofern das Gerät es unterstützt. Modus **„Weites Sichtfeld“** (auf dem iPad automatisch aktiv) verhindert das stark vergrößerte Kamerabild.
@@ -22,10 +23,11 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 
 ## Benutzung
 
-1. Auf **Scannen** tippen und Kamerazugriff erlauben.
-2. Seiten nacheinander fotografieren, dann **Fertig**.
+1. In der Ablage auf **Scannen** tippen (legt ein neues Dokument an) und Kamerazugriff erlauben.
+2. Seiten nacheinander fotografieren (automatisch oder per Auslöser), dann **Fertig**.
 3. Das PDF wird sofort erstellt → **Teilen** oder **Speichern**.
-4. Optional: Seite antippen, um Zuschnitt, Drehung, Filter oder Reihenfolge zu ändern, danach über **PDF** neu erstellen.
+4. Das Dokument bleibt in der Ablage: antippen zum Ansehen, Ergänzen (Scannen/Importieren) oder erneuten PDF-Export; Name antippen zum Umbenennen.
+5. Seite antippen, um Zuschnitt, Drehung, Filter oder Reihenfolge zu ändern; „Text“ zeigt den erkannten Text.
 
 ## Online nutzen
 
