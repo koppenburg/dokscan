@@ -38,6 +38,7 @@
     <symbol id="i-new" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M12 18v-6M9 15h6"/></symbol>
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 17v4M17 19h4"/></symbol>
     <symbol id="i-full" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
+    <symbol id="i-switch" viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><path d="M9 13a3 3 0 0 1 5.2-2"/><path d="M15 13a3 3 0 0 1-5.2 2"/><path d="M14.5 9v2.2h-2.2M9.5 17v-2.2h2.2"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   </defs>
 </svg>
@@ -83,15 +84,20 @@
 <section id="camera" class="screen camera" hidden aria-label="Kamera">
   <video id="video" playsinline muted autoplay></video>
   <div class="cam-guide" aria-hidden="true"></div>
+  <svg id="camQuad" class="cam-quad" aria-hidden="true"><polygon id="camQuadPoly"/></svg>
   <div id="camMsg" class="cam-msg" hidden>
     <p id="camMsgText">Kamera wird gestartet …</p>
     <button id="camFallback" class="btn" type="button" hidden><svg class="ic"><use href="#i-camera"/></svg>Kamera-App verwenden</button>
   </div>
   <div class="cam-top">
-    <button id="camClose" class="cam-round" type="button" aria-label="Kamera schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+    <div class="cam-side"><button id="camClose" class="cam-round" type="button" aria-label="Kamera schließen"><svg class="ic"><use href="#i-x"/></svg></button></div>
     <span id="camHint" class="cam-pill">Seite 1</span>
-    <button id="camTorch" class="cam-round" type="button" aria-label="Licht" aria-pressed="false" hidden><svg class="ic"><use href="#i-bolt"/></svg></button>
+    <div class="cam-side right">
+      <button id="camSwitch" class="cam-round" type="button" aria-label="Kamera wechseln" title="Kamera wechseln" hidden><svg class="ic"><use href="#i-switch"/></svg></button>
+      <button id="camTorch" class="cam-round" type="button" aria-label="Licht" aria-pressed="false" hidden><svg class="ic"><use href="#i-bolt"/></svg></button>
+    </div>
   </div>
+  <div id="camZoom" class="cam-zoom" role="radiogroup" aria-label="Zoom" hidden></div>
   <div class="cam-bottom">
     <div class="cam-last-wrap">
       <div id="camLast" class="cam-last" hidden><img alt=""><span id="camCount" class="badge">0</span></div>
@@ -208,6 +214,7 @@
       <div class="chips wrap" id="setFilter" role="radiogroup" aria-label="Standardfilter"></div>
     </div>
     <label class="switch"><input id="setAutoCrop" type="checkbox"><span class="track"></span><span>Dokumentränder automatisch erkennen</span></label>
+    <label class="switch"><input id="setWideFov" type="checkbox"><span class="track"></span><span>Weites Sichtfeld<br><span class="muted small">Kamerabild ohne Zuschnitt (empfohlen für iPad), etwas geringere Auflösung</span></span></label>
     <label class="switch"><input id="setAutoPdf" type="checkbox"><span class="track"></span><span>Nach dem Scannen automatisch PDF erstellen</span></label>
     <p class="muted small">Seiten werden nur lokal in diesem Browser gespeichert, bis du ein neues Dokument beginnst.</p>
     <button id="setClear" class="btn danger wide" type="button"><svg class="ic"><use href="#i-trash"/></svg>Alle Seiten löschen</button>

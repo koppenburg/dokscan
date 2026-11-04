@@ -1,6 +1,6 @@
 'use strict';
 // Offline-Cache für die App-Dateien (stale-while-revalidate).
-const CACHE = 'dokscan-v1';
+const CACHE = 'dokscan-v3';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'app.js', 'imaging.js', 'pdf.js',
   'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png',

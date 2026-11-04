@@ -7,9 +7,10 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 ## Funktionen
 
 - **Serienaufnahme** mit der Rückkamera (Live-Vorschau, Auslöser, Licht/Taschenlampe falls verfügbar).
+- **Zoom & Kamerawahl:** Zoom-Tasten (z. B. 0,5× / 1× / 2×) und Zoomen mit zwei Fingern, Wechsel auf Ultraweitwinkel u. a. – sofern das Gerät es unterstützt. Modus **„Weites Sichtfeld“** (auf dem iPad automatisch aktiv) verhindert das stark vergrößerte Kamerabild.
   Ohne Kamerazugriff wird automatisch die Kamera-App des Geräts verwendet.
 - **Import** vorhandener Fotos (Mehrfachauswahl oder Drag & Drop am Desktop).
-- **Automatische Randerkennung** und Perspektivkorrektur – Ecken lassen sich mit Lupe manuell nachziehen.
+- **Automatische Randerkennung**: Schon in der Kamera wird der erkannte Dokumentrand live als Rahmen angezeigt; das Foto wird automatisch zugeschnitten und entzerrt. Funktioniert auf dunklen, farbigen und hellen Untergründen. Ecken lassen sich mit Lupe manuell nachziehen.
 - **Filter:** Dokument (Schatten entfernen, weißes Papier), Original, Graustufen, Schwarz-Weiß.
 - Seiten **drehen, löschen und per Ziehen umsortieren**.
 - **PDF automatisch nach dem Scannen**: DIN A4 oder Fotoformat, drei Qualitätsstufen,

@@ -362,25 +362,17 @@ const Img = (() => {
     return out;
   }
 
-  /**
-   * Sucht ein helles Viereck (Papier) vor dunklerem Hintergrund.
-   * Gibt normalisierte Ecken zurück oder null, wenn nichts Sicheres gefunden wurde.
-   */
-  function detect(src) {
-    const small = draw(src, 256);
-    const w = small.width, h = small.height, n = w * h;
-    const d = ctx(small).getImageData(0, 0, w, h).data;
-    release(small);
-    let g = new Float32Array(n);
-    for (let i = 0; i < n; i++) g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
-    g = blur(g, w, h, 2);
-
-    // Otsu-Schwellwert
+  /** Otsu-Schwellwert und Mittelwert der hellen Klasse. */
+  function otsu(g, lo = -1) {
     const hist = new Float64Array(256);
-    for (let i = 0; i < n; i++) hist[Math.min(255, g[i] | 0)]++;
+    let n = 0;
+    for (let i = 0; i < g.length; i++) {
+      const v = Math.min(255, Math.max(0, g[i] | 0));
+      if (v > lo) { hist[v]++; n++; }
+    }
     let sum = 0;
     for (let t = 0; t < 256; t++) sum += t * hist[t];
-    let sumB = 0, wB = 0, best = 0, thr = 127;
+    let sumB = 0, wB = 0, best = 0, thr = 127, hi = 200;
     for (let t = 0; t < 256; t++) {
       wB += hist[t];
       if (!wB) continue;
@@ -389,15 +381,30 @@ const Img = (() => {
       sumB += t * hist[t];
       const mB = sumB / wB, mF = (sum - sumB) / wF;
       const between = wB * wF * (mB - mF) * (mB - mF);
-      if (between > best) { best = between; thr = t; }
+      if (between > best) { best = between; thr = t; hi = mF; }
     }
+    return { thr, hi };
+  }
 
-    // Größte helle Zusammenhangskomponente
+  function angleOk(q) {
+    for (let i = 0; i < 4; i++) {
+      const a = q[(i + 3) % 4], b = q[i], c = q[(i + 1) % 4];
+      const v1 = [a[0] - b[0], a[1] - b[1]], v2 = [c[0] - b[0], c[1] - b[1]];
+      const cos = (v1[0] * v2[0] + v1[1] * v2[1]) / ((Math.hypot(...v1) * Math.hypot(...v2)) || 1);
+      const deg = Math.acos(Math.max(-1, Math.min(1, cos))) * 180 / Math.PI;
+      if (deg < 40 || deg > 140) return false;
+    }
+    return true;
+  }
+
+  /** Größte Zusammenhangskomponente der Maske → Viereck mit Bewertung (oder null). */
+  function quadFromMask(mask, w, h, inset = 1.2) {
+    const n = w * h;
     const label = new Int32Array(n);
     const stack = new Int32Array(n);
     let cur = 0, bestLabel = 0, bestSize = 0;
     for (let s = 0; s < n; s++) {
-      if (label[s] || g[s] <= thr) continue;
+      if (label[s] || !mask[s]) continue;
       cur++;
       let sp = 0, size = 0;
       stack[sp++] = s; label[s] = cur;
@@ -405,14 +412,14 @@ const Img = (() => {
         const p = stack[--sp];
         size++;
         const x = p % w;
-        if (x > 0 && !label[p - 1] && g[p - 1] > thr) { label[p - 1] = cur; stack[sp++] = p - 1; }
-        if (x < w - 1 && !label[p + 1] && g[p + 1] > thr) { label[p + 1] = cur; stack[sp++] = p + 1; }
-        if (p >= w && !label[p - w] && g[p - w] > thr) { label[p - w] = cur; stack[sp++] = p - w; }
-        if (p < n - w && !label[p + w] && g[p + w] > thr) { label[p + w] = cur; stack[sp++] = p + w; }
+        if (x > 0 && !label[p - 1] && mask[p - 1]) { label[p - 1] = cur; stack[sp++] = p - 1; }
+        if (x < w - 1 && !label[p + 1] && mask[p + 1]) { label[p + 1] = cur; stack[sp++] = p + 1; }
+        if (p >= w && !label[p - w] && mask[p - w]) { label[p - w] = cur; stack[sp++] = p - w; }
+        if (p < n - w && !label[p + w] && mask[p + w]) { label[p + w] = cur; stack[sp++] = p + w; }
       }
       if (size > bestSize) { bestSize = size; bestLabel = cur; }
     }
-    if (bestSize < 0.12 * n || bestSize > 0.97 * n) return null;
+    if (bestSize < 0.1 * n || bestSize > 0.97 * n) return null;
 
     // Randpunkte: äußerste Pixel je Zeile und je Spalte
     const pts = [];
@@ -430,7 +437,7 @@ const Img = (() => {
       }
       if (miny >= 0) pts.push([x + 0.5, miny], [x + 0.5, maxy + 1]);
     }
-    let hull = convexHull(pts);
+    const hull = convexHull(pts);
     if (hull.length < 4) return null;
     const hullArea = polyArea(hull);
     while (hull.length > 4) {
@@ -443,16 +450,99 @@ const Img = (() => {
       hull.splice(mi, 1);
     }
     const quadArea = polyArea(hull);
-    if (quadArea < 0.12 * n || quadArea / hullArea < 0.9 || bestSize / quadArea < 0.7) return null;
+    const fill = Math.min(1, bestSize / quadArea);
+    const fit = quadArea / hullArea;
+    if (quadArea < 0.1 * n || fit < 0.88 || fill < 0.7) return null;
     const refined = refine(orderCorners(hull), pts, w, h);
     // leicht nach innen ziehen, damit kein dunkler Hintergrundrand stehen bleibt
     const mx = refined.reduce((s, p) => s + p[0], 0) / 4, my = refined.reduce((s, p) => s + p[1], 0) / 4;
-    const inset = refined.map(([x, y]) => {
+    const q = refined.map(([x, y]) => {
       const dx = mx - x, dy = my - y, l = Math.hypot(dx, dy) || 1;
-      return [x + (dx / l) * 1.2, y + (dy / l) * 1.2];
+      return [Math.min(1, Math.max(0, (x + (dx / l) * inset) / w)), Math.min(1, Math.max(0, (y + (dy / l) * inset) / h))];
     });
-    const q = inset.map(([x, y]) => [Math.min(1, Math.max(0, x / w)), Math.min(1, Math.max(0, y / h))]);
-    if (!isConvex(q)) return null;
+    if (!isConvex(q) || !angleOk(q.map(([x, y]) => [x * w, y * h]))) return null;
+    // Kanten, die auf dem Bildrand liegen, sprechen eher für Hintergrund als für ein Blatt
+    let onBorder = 0;
+    for (let i = 0; i < 4; i++) {
+      const a = q[i], b = q[(i + 1) % 4];
+      const near = (v) => v < 0.03 || v > 0.97;
+      if ((near(a[0]) && near(b[0]) && Math.abs(a[0] - b[0]) < 0.03) || (near(a[1]) && near(b[1]) && Math.abs(a[1] - b[1]) < 0.03)) onBorder++;
+    }
+    // Zwei oder mehr Kanten auf dem Bildrand: kein freistehendes Blatt (Verlauf, Wand, Blatt füllt das Bild)
+    if (onBorder >= 2) return null;
+    const areaFrac = quadArea / n;
+    const score = fill * fit * (0.5 + 0.5 * Math.min(1, areaFrac / 0.8)) - onBorder * 0.1;
+    return { quad: q, score };
+  }
+
+  /**
+   * Erkennt die Ränder eines Dokuments (Blatt Papier) im Bild.
+   * Prüft mehrere Merkmale (Helligkeit, „Papierweiß“) und Schwellwerte und nimmt das beste Viereck.
+   * Gibt normalisierte Ecken zurück oder null, wenn nichts Sicheres gefunden wurde.
+   */
+  function detect(src, size = 256) {
+    const small = draw(src, size);
+    const w = small.width, h = small.height, n = w * h;
+    const d = ctx(small).getImageData(0, 0, w, h).data;
+    release(small);
+    const gray = new Float32Array(n), white = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
+      gray[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+      const mn = Math.min(r, g, b), mxc = Math.max(r, g, b);
+      white[i] = mn - 0.5 * (mxc - mn); // hell UND farblos
+    }
+    let best = null;
+    for (const raw of [gray, white]) {
+      const f = blur(raw, w, h, 2);
+      const { thr, hi } = otsu(f);
+      // zweite Stufe: trennt Papier vom hellen Untergrund, wenn die erste nur Schrift abgetrennt hat
+      const upper = otsu(f, thr).thr;
+      const levels = [thr, thr + (hi - thr) * 0.4];
+      if (upper > thr + 4) levels.push(upper);
+      for (const t of levels) {
+        const mask = new Uint8Array(n);
+        for (let i = 0; i < n; i++) mask[i] = f[i] > t ? 1 : 0;
+        const c = quadFromMask(mask, w, h);
+        if (c && (!best || c.score > best.score)) best = c;
+      }
+    }
+    // Kantenbasiert: alles, was vom Bildrand aus ohne Kante erreichbar ist, ist Hintergrund.
+    // Hilft bei hellem Untergrund, wo Helligkeits-Schwellwerte versagen.
+    {
+      const f = blur(gray, w, h, 1);
+      const edge = new Uint8Array(n);
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          const i = y * w + x;
+          const gx = (f[i + 1] - f[i - 1]) / 2, gy = (f[i + w] - f[i - w]) / 2;
+          if (gx * gx + gy * gy > 9) edge[i] = 1;
+        }
+      }
+      const closed = dilate(edge, w, h, 1);
+      const bg = new Uint8Array(n);
+      const stack = new Int32Array(n);
+      let sp = 0;
+      const seed = (i) => { if (!bg[i] && !closed[i]) { bg[i] = 1; stack[sp++] = i; } };
+      for (let x = 0; x < w; x++) { seed(x); seed((h - 1) * w + x); }
+      for (let y = 0; y < h; y++) { seed(y * w); seed(y * w + w - 1); }
+      while (sp) {
+        const p = stack[--sp];
+        const x = p % w;
+        if (x > 0) seed(p - 1);
+        if (x < w - 1) seed(p + 1);
+        if (p >= w) seed(p - w);
+        if (p < n - w) seed(p + w);
+      }
+      const mask = new Uint8Array(n);
+      for (let i = 0; i < n; i++) mask[i] = bg[i] ? 0 : 1;
+      const c = quadFromMask(mask, w, h, 4);
+      if (c && (!best || c.score > best.score)) best = c;
+    }
+    if (!best || best.score < 0.6) return null;
+    // minimal nach innen, damit kein Streifen Untergrund am Rand bleibt
+    const cx = best.quad.reduce((a, p) => a + p[0], 0) / 4, cy = best.quad.reduce((a, p) => a + p[1], 0) / 4;
+    const q = best.quad.map(([x, y]) => [x + (cx - x) * 0.012, y + (cy - y) * 0.012]);
     // Fast das ganze Bild? Dann einfach das ganze Bild nehmen.
     if (q.every((p, i) => Math.abs(p[0] - FULL[i][0]) < 0.02 && Math.abs(p[1] - FULL[i][1]) < 0.02)) return FULL.map((p) => p.slice());
     return q;

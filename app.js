@@ -16,7 +16,8 @@
   ];
 
   // ---------- Einstellungen ----------
-  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium' };
+  const IS_IPAD = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null };
   const settings = (() => {
     try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('dokscan.settings') || '{}') }; }
     catch { return { ...DEFAULTS }; }
@@ -144,10 +145,10 @@
     return res;
   }
 
-  async function addFromCanvas(c) {
+  async function addFromCanvas(c, hint) {
     let corners = Img.FULL.map((x) => x.slice());
     if (settings.autoCrop) {
-      try { corners = Img.detect(c) || corners; } catch (e) { console.warn(e); }
+      try { corners = Img.detect(c) || hint || corners; } catch (e) { console.warn(e); }
     }
     const original = await Img.toBlob(c, 'image/jpeg', 0.92);
     const p = { id: uid(), created: Date.now(), original, rotation: 0, corners, filter: settings.filter, processed: null, thumb: null };
@@ -314,17 +315,69 @@
     $('#camDone').disabled = cam.added === 0;
     $('#camCount').textContent = String(cam.added);
     $('#camLast').hidden = cam.added === 0;
-    $('#camHint').textContent = `Seite ${pages.length + 1}`;
+    const page = `Seite ${pages.length + 1}`;
+    $('#camHint').textContent = !settings.autoCrop ? page : live.quad ? `${page} · Rand erkannt` : `${page} · Dokument suchen …`;
+  }
+
+  // Live-Randerkennung im Kamerabild
+  const live = { timer: null, quad: null, miss: 0 };
+  function startLive() {
+    stopLive();
+    if (settings.autoCrop) live.timer = setInterval(liveTick, 250);
+  }
+  function stopLive() {
+    clearInterval(live.timer);
+    live.timer = null;
+    live.quad = null;
+    live.miss = 0;
+    drawLive();
+  }
+  function liveTick() {
+    if (!video.videoWidth || cam.shooting || document.hidden) return;
+    let q = null;
+    try { q = Img.detect(video, 160); } catch { q = null; }
+    if (q) {
+      live.miss = 0;
+      live.quad = live.quad ? live.quad.map((p, i) => [p[0] * 0.4 + q[i][0] * 0.6, p[1] * 0.4 + q[i][1] * 0.6]) : q;
+    } else if (++live.miss > 3) {
+      live.quad = null;
+    }
+    drawLive();
+  }
+  function drawLive() {
+    const svg = $('#camQuad'), poly = $('#camQuadPoly');
+    const found = !!live.quad && !!video.videoWidth;
+    $('#camera').classList.toggle('doc-found', found);
+    updateCamUi();
+    if (!found) { poly.removeAttribute('points'); return; }
+    const r = svg.getBoundingClientRect();
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const s = Math.min(r.width / vw, r.height / vh);
+    const ox = (r.width - vw * s) / 2, oy = (r.height - vh * s) / 2;
+    svg.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
+    poly.setAttribute('points', live.quad.map(([x, y]) => `${(ox + x * vw * s).toFixed(1)},${(oy + y * vh * s).toFixed(1)}`).join(' '));
   }
 
   async function startStream() {
     stopStream();
     setCamMsg('Kamera wird gestartet …', false);
+    // „Weites Sichtfeld“: 4:3-Format in mittlerer Auflösung – iPads schneiden bei sehr hohen Auflösungen das Bild zu.
+    const res = settings.wideFov
+      ? { width: { ideal: 1920 }, height: { ideal: 1440 }, aspectRatio: { ideal: 4 / 3 } }
+      : { width: { ideal: 4096 }, height: { ideal: 3072 } };
+    const byFacing = { facingMode: { ideal: 'environment' }, ...res };
     try {
-      cam.stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 4096 }, height: { ideal: 3072 } },
-      });
+      try {
+        cam.stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: settings.camDevice ? { deviceId: { exact: settings.camDevice }, ...res } : byFacing,
+        });
+      } catch (e) {
+        if (!settings.camDevice || e.name === 'NotAllowedError' || e.name === 'SecurityError') throw e;
+        settings.camDevice = ''; // gespeicherte Kamera gibt es nicht mehr
+        saveSettings();
+        cam.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: byFacing });
+      }
     } catch (e) {
       console.warn(e);
       const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
@@ -338,13 +391,128 @@
     video.srcObject = cam.stream;
     try { await video.play(); } catch { /* autoplay */ }
     setCamMsg('', false);
+    startLive();
     const caps = cam.track && cam.track.getCapabilities ? cam.track.getCapabilities() : {};
     $('#camTorch').hidden = !caps.torch;
     cam.torch = false;
     $('#camTorch').setAttribute('aria-pressed', 'false');
+    setupZoom(caps);
+    refreshCameras();
   }
 
+  // ---------- Zoom ----------
+  const fmtZoom = (z) => `${String(Math.round(z * 10) / 10).replace('.', ',')}×`;
+  function setupZoom(caps) {
+    const row = $('#camZoom');
+    row.textContent = '';
+    cam.zoomRange = null;
+    const zc = caps && caps.zoom;
+    if (!zc || !(zc.max > zc.min)) { row.hidden = true; return; }
+    const min = zc.min, max = zc.max;
+    cam.zoomRange = { min, max };
+    const presets = [min];
+    if (min < 0.95 && max >= 1) presets.push(1);
+    if (max >= 2) presets.push(2);
+    if (presets.length < 2) presets.push(Math.min(max, min * 2));
+    for (const z of presets) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.dataset.zoom = String(z);
+      b.setAttribute('role', 'radio');
+      b.textContent = fmtZoom(z);
+      b.addEventListener('click', () => { settings.zoom = z; saveSettings(); applyZoom(z); });
+      row.appendChild(b);
+    }
+    row.hidden = false;
+    // Standard: kleinster Zoom = größtes Sichtfeld
+    const start = settings.zoom != null ? settings.zoom : min;
+    applyZoom(Math.min(max, Math.max(min, start)));
+  }
+  let zoomBusy = false, zoomNext = null;
+  async function applyZoom(z) {
+    if (!cam.track || !cam.zoomRange) return;
+    cam.zoom = z;
+    $('#camZoom').querySelectorAll('button').forEach((b) => {
+      b.setAttribute('aria-checked', String(Math.abs(Number(b.dataset.zoom) - z) < 0.05));
+    });
+    if (zoomBusy) { zoomNext = z; return; }
+    zoomBusy = true;
+    try { await cam.track.applyConstraints({ advanced: [{ zoom: z }] }); } catch (e) { console.warn(e); }
+    zoomBusy = false;
+    if (zoomNext != null) { const n = zoomNext; zoomNext = null; applyZoom(n); }
+  }
+  // Zoomen mit zwei Fingern
+  const pinch = new Map();
+  let pinchStart = null;
+  const cameraEl = $('#camera');
+  cameraEl.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button')) return;
+    pinch.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pinch.size === 2 && cam.zoomRange) {
+      const [a, b] = [...pinch.values()];
+      pinchStart = { d: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, z: cam.zoom || cam.zoomRange.min };
+    }
+  });
+  cameraEl.addEventListener('pointermove', (e) => {
+    if (!pinch.has(e.pointerId)) return;
+    pinch.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pinch.size !== 2 || !pinchStart || !cam.zoomRange) return;
+    const [a, b] = [...pinch.values()];
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    const z = Math.min(cam.zoomRange.max, Math.max(cam.zoomRange.min, pinchStart.z * d / pinchStart.d));
+    applyZoom(z);
+    $('#camHint').textContent = `Zoom ${fmtZoom(z)}`;
+  });
+  const pinchEnd = (e) => {
+    pinch.delete(e.pointerId);
+    if (pinch.size < 2 && pinchStart) {
+      pinchStart = null;
+      settings.zoom = cam.zoom;
+      saveSettings();
+      updateCamUi();
+    }
+  };
+  cameraEl.addEventListener('pointerup', pinchEnd);
+  cameraEl.addEventListener('pointercancel', pinchEnd);
+
+  // ---------- Kamera wechseln ----------
+  function cameraName(d, i) {
+    const l = d.label || '';
+    const map = [
+      [/ultra ?wide|ultraweit/i, 'Ultraweitwinkel'],
+      [/triple/i, 'Triple-Kamera'],
+      [/dual wide/i, 'Dual-Weitwinkel'],
+      [/dual/i, 'Dual-Kamera'],
+      [/tele/i, 'Teleobjektiv'],
+      [/wide|weitwinkel|back camera|rückkamera|rückseit/i, 'Weitwinkel'],
+    ];
+    for (const [re, name] of map) if (re.test(l)) return name;
+    return l || `Kamera ${i + 1}`;
+  }
+  async function refreshCameras() {
+    let devs = [];
+    try { devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput'); } catch { /* egal */ }
+    const front = /\bfront|vorder|facetime|selfie/i;
+    let back = devs.filter((d) => !front.test(d.label));
+    if (!back.length) back = devs;
+    cam.devices = back;
+    $('#camSwitch').hidden = back.length < 2;
+  }
+  $('#camSwitch').addEventListener('click', () => {
+    const list = cam.devices || [];
+    if (list.length < 2 || !cam.track) return;
+    const curId = (cam.track.getSettings && cam.track.getSettings().deviceId) || settings.camDevice;
+    const i = list.findIndex((d) => d.deviceId === curId);
+    const next = list[(i + 1) % list.length];
+    settings.camDevice = next.deviceId;
+    settings.zoom = null;
+    saveSettings();
+    toast(cameraName(next, list.indexOf(next)));
+    startStream();
+  });
+
   function stopStream() {
+    stopLive();
     if (cam.stream) cam.stream.getTracks().forEach((t) => t.stop());
     cam.stream = null;
     cam.track = null;
@@ -384,7 +552,7 @@
       Img.release(t);
       cam.added++;
       updateCamUi();
-      await addFromCanvas(c);
+      await addFromCanvas(c, live.quad && live.quad.map((p) => p.slice()));
       Img.release(c);
       updateCamUi();
     } catch (e) {
@@ -836,11 +1004,13 @@
     buildChips($('#setFilter'), settings.filter, (f) => { settings.filter = f; saveSettings(); markChips($('#setFilter'), f); });
     $('#setAutoCrop').checked = settings.autoCrop;
     $('#setAutoPdf').checked = settings.autoPdf;
+    $('#setWideFov').checked = settings.wideFov;
     $('#setClear').disabled = pages.length === 0;
     setDialog.showModal();
   });
   $('#setAutoCrop').addEventListener('change', (e) => { settings.autoCrop = e.target.checked; saveSettings(); });
   $('#setAutoPdf').addEventListener('change', (e) => { settings.autoPdf = e.target.checked; saveSettings(); });
+  $('#setWideFov').addEventListener('change', (e) => { settings.wideFov = e.target.checked; saveSettings(); });
   setDialog.addEventListener('click', (e) => { if (e.target === setDialog) setDialog.close(); });
 
   async function clearAll() {
