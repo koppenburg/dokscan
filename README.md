@@ -20,7 +20,8 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 - **Filter:** Dokument (Schatten entfernen, weißes Papier), Original, Graustufen, Schwarz-Weiß. Fotos, Logos und farbige Flächen auf der Seite bleiben erhalten.
 - **Perspektive:** Schräg fotografierte Seiten werden mit dem echten Seitenverhältnis entzerrt (A4/Letter werden erkannt).
 - **Helligkeit und Kontrast:** „Anpassen“ im Editor öffnet zwei Regler mit Live-Vorschau – für blasse Kopien, Durchschläge oder dunkle Fotos. „Alle Seiten“ überträgt die Einstellung auf das ganze Dokument (mit „Rückgängig“). Doppeltippen auf einen Regler setzt ihn zurück.
-- Seiten **drehen, löschen und per Ziehen umsortieren**.
+- Seiten **drehen, löschen (mit „Rückgängig“) und per Ziehen umsortieren**; im Editor mit den Pfeilen am Bildrand, per Wischen oder mit den Pfeiltasten zwischen den Seiten blättern.
+- **Datensicherung:** In den Einstellungen „Ablage sichern“ erstellt eine ZIP-Datei mit allen Dokumenten (z. B. für „Dateien“/iCloud Drive), „Sicherung laden“ stellt sie wieder her – auch auf einem anderen Gerät. Die Einstellungen zeigen den belegten Speicher und das Datum der letzten Sicherung; in Safari ohne Home-Bildschirm erscheint ein Hinweis, dass Daten sonst gelöscht werden können.
 - **Texterkennung (OCR):** Der Text wird lokal auf dem Gerät erkannt (Tesseract, Deutsch). Das PDF wird durchsuchbar, Text lässt sich markieren und kopieren; im Editor zeigt „Text“ den erkannten Text zum Kopieren. Die Dateien (ca. 7 MB) werden beim ersten Start im Hintergrund geladen und bleiben auch nach App-Updates offline verfügbar.
 - **Passwortschutz**: PDF optional mit Öffnen-Passwort (AES-256, PDF-Standard R6); das Passwort wird nicht gespeichert.
 - **PDF-Einstellungen**: Seitenformat A4, A5, US Letter oder wie Foto; Ausrichtung automatisch/hoch/quer; Seitenrand ohne/5/10/20 mm; maximale Dateigröße 1/2/5 MB (z. B. für E-Mail) – die Bilder werden dann nur so weit verkleinert wie nötig.
@@ -71,6 +72,7 @@ python3 -m http.server 8000
 | `ocr.js`, `vendor/tesseract/` | Texterkennung (Tesseract, lokal eingebunden) |
 | `pdfimport.js`, `vendor/pdfjs/` | PDF-Import (pdf.js, lokal eingebunden) |
 | `naming.js` | Namensvorschlag aus dem Text (Datum, Absender, Dokumentart) |
+| `backup.js` | Datensicherung der Ablage als ZIP (ohne fremde Bibliothek) |
 | `sw.js`, `manifest.webmanifest`, Icons | PWA / Offline |
 
 Nach Änderungen an App-Dateien `CACHE` in `sw.js` hochzählen, damit installierte Apps die neue Version laden.

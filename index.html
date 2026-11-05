@@ -49,6 +49,10 @@
     <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
     <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
     <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></symbol>
+    <symbol id="i-move-l" viewBox="0 0 24 24"><path d="M4 4v16"/><path d="M20 12H8"/><path d="m12 8-4 4 4 4"/></symbol>
+    <symbol id="i-move-r" viewBox="0 0 24 24"><path d="M20 4v16"/><path d="M4 12h12"/><path d="m12 8 4 4-4 4"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></symbol>
+    <symbol id="i-restore" viewBox="0 0 24 24"><path d="M12 21V9"/><path d="m7 14 5-5 5 5"/><path d="M5 3h14"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   </defs>
 </svg>
@@ -79,13 +83,17 @@
       </ol>
       <p class="muted small">Jeder Scan wird als eigenes Dokument in der Ablage gespeichert – nur auf deinem Gerät.</p>
     </section>
+    <div id="homeHint" class="home-hint" hidden>
+      <p><b>Tipp:</b> Füge DokScan über <b>Teilen › Zum Home-Bildschirm</b> hinzu. Sonst kann Safari die gespeicherten Dokumente löschen, wenn die App länger nicht benutzt wird.</p>
+      <button id="homeHintClose" class="icon-btn" type="button" aria-label="Hinweis schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+    </div>
     <p id="libNoHits" class="muted center no-hits" hidden>Keine Treffer.</p>
     <ul id="docList" class="doc-list" aria-label="Dokumente"></ul>
   </main>
 
   <footer class="bottombar">
     <button id="libImport" class="bar-btn" type="button"><svg class="ic"><use href="#i-image"/></svg><span>Importieren</span></button>
-    <button id="libScan" class="scan-btn" type="button" aria-label="Neues Dokument scannen"><svg class="ic"><use href="#i-camera"/></svg></button>
+    <button id="libScan" class="scan-btn" type="button" aria-label="Neues Dokument scannen"><svg class="ic"><use href="#i-camera"/></svg><span>Scannen</span></button>
     <span class="bar-spacer" aria-hidden="true"></span>
   </footer>
 </div>
@@ -109,11 +117,11 @@
   <main id="overview">
     <p id="docEmpty" class="muted center doc-empty" hidden>Noch keine Seiten. Tippe auf <b>Scannen</b> oder <b>Importieren</b>.</p>
     <ol id="pageGrid" class="grid" aria-label="Seiten"></ol>
-    <p id="gridHint" class="muted small hint" hidden>Tippe auf eine Seite zum Bearbeiten · Halte <svg class="ic ic-inline"><use href="#i-grip"/></svg> gedrückt und ziehe, um die Reihenfolge zu ändern.</p>
+    <p id="gridHint" class="muted small hint" hidden>Tippe auf eine Seite zum Bearbeiten · Ziehe am Griff <svg class="ic ic-inline"><use href="#i-grip"/></svg>, um die Reihenfolge zu ändern.</p>
   </main>
   <footer class="bottombar no-sel">
     <button id="btnImport" class="bar-btn" type="button"><svg class="ic"><use href="#i-image"/></svg><span>Importieren</span></button>
-    <button id="btnScan" class="scan-btn" type="button" aria-label="Seiten scannen"><svg class="ic"><use href="#i-camera"/></svg></button>
+    <button id="btnScan" class="scan-btn" type="button" aria-label="Seiten scannen"><svg class="ic"><use href="#i-camera"/></svg><span>Scannen</span></button>
     <button id="btnPdf" class="bar-btn" type="button" disabled><svg class="ic"><use href="#i-pdf"/></svg><span>PDF</span></button>
   </footer>
   <footer id="selTools" class="ed-tools sel-tools sel-only">
@@ -166,13 +174,15 @@
 <section id="editor" class="screen editor" hidden aria-label="Seite bearbeiten">
   <header class="topbar ed-top">
     <button id="edBack" class="icon-btn" type="button" aria-label="Zurück"><svg class="ic"><use href="#i-left"/></svg></button>
-    <h2 id="edTitle">Seite 1</h2>
+    <h2 id="edTitle" tabindex="-1">Seite 1</h2>
     <button id="edRetake" class="pill-btn" type="button" title="Seite neu aufnehmen"><svg class="ic"><use href="#i-camera"/></svg><span>Neu aufnehmen</span></button>
     <button id="edDelete" class="icon-btn danger" type="button" aria-label="Seite löschen" title="Seite löschen"><svg class="ic"><use href="#i-trash"/></svg></button>
   </header>
   <div id="edStage" class="ed-stage">
+    <button id="edPrev" class="ed-nav prev" type="button" aria-label="Vorherige Seite"><svg class="ic"><use href="#i-left"/></svg></button>
+    <button id="edNext" class="ed-nav next" type="button" aria-label="Nächste Seite"><svg class="ic"><use href="#i-right"/></svg></button>
     <div id="edPreviewWrap" class="ed-preview">
-      <img id="edPreview" alt="Vorschau der Seite">
+      <img id="edPreview" alt="Vorschau der Seite" draggable="false">
       <canvas id="adjCanvas" class="adj-canvas" hidden></canvas>
       <span class="spinner big" id="edSpinner" hidden></span>
     </div>
@@ -197,12 +207,12 @@
       <button id="edAdjust" class="chip adj-chip" type="button" title="Helligkeit und Kontrast"><svg class="ic"><use href="#i-sun"/></svg><span>Anpassen</span></button>
     </div>
     <div class="tool-row">
-      <button id="edMovePrev" class="tool" type="button"><svg class="ic"><use href="#i-left"/></svg><span>Nach vorn</span></button>
+      <button id="edMovePrev" class="tool" type="button" aria-label="Seite nach vorn verschieben"><svg class="ic"><use href="#i-move-l"/></svg><span>Nach vorn</span></button>
       <button id="edRotL" class="tool" type="button"><svg class="ic"><use href="#i-rot-l"/></svg><span>Links</span></button>
       <button id="edCrop" class="tool" type="button"><svg class="ic"><use href="#i-crop"/></svg><span>Zuschnitt</span></button>
       <button id="edRotR" class="tool" type="button"><svg class="ic"><use href="#i-rot-r"/></svg><span>Rechts</span></button>
       <button id="edText" class="tool" type="button"><svg class="ic"><use href="#i-text"/></svg><span>Text</span></button>
-      <button id="edMoveNext" class="tool" type="button"><svg class="ic"><use href="#i-right"/></svg><span>Nach hinten</span></button>
+      <button id="edMoveNext" class="tool" type="button" aria-label="Seite nach hinten verschieben"><svg class="ic"><use href="#i-move-r"/></svg><span>Nach hinten</span></button>
     </div>
   </div>
   <div id="adjTools" class="ed-tools" hidden>
@@ -238,8 +248,8 @@
       <span class="input-suffix"><input id="pdfName" type="text" autocomplete="off" spellcheck="false"><span>.pdf</span></span>
     </label>
     <div class="field">
-      <span>Seitenformat</span>
-      <div class="seg" id="pdfFormat">
+      <span id="lblFormat">Seitenformat</span>
+      <div class="seg" id="pdfFormat" role="radiogroup" aria-labelledby="lblFormat">
         <label><input type="radio" name="format" value="a4"><span>A4</span></label>
         <label><input type="radio" name="format" value="a5"><span>A5</span></label>
         <label><input type="radio" name="format" value="letter"><span>Letter</span></label>
@@ -247,9 +257,9 @@
       </div>
     </div>
     <div class="field">
-      <span>Qualität</span>
-      <div class="seg" id="pdfQuality">
-        <label><input type="radio" name="quality" value="high"><span>Hoch</span></label>
+      <span id="lblQuality">Qualität</span>
+      <div class="seg" id="pdfQuality" role="radiogroup" aria-labelledby="lblQuality">
+        <label><input type="radio" name="quality" value="high"><span>Beste</span></label>
         <label><input type="radio" name="quality" value="medium"><span>Mittel</span></label>
         <label><input type="radio" name="quality" value="low"><span>Klein</span></label>
       </div>
@@ -259,16 +269,16 @@
       <summary><span>Weitere Einstellungen</span><span id="pdfMoreSummary" class="muted small"></span></summary>
       <div class="more-body">
         <div class="field" id="pdfOrientField">
-          <span>Ausrichtung</span>
-          <div class="seg">
+          <span id="lblOrient">Ausrichtung</span>
+          <div class="seg" role="radiogroup" aria-labelledby="lblOrient">
             <label><input type="radio" name="orient" value="auto"><span>Automatisch</span></label>
-            <label><input type="radio" name="orient" value="portrait"><span>Hoch</span></label>
-            <label><input type="radio" name="orient" value="landscape"><span>Quer</span></label>
+            <label><input type="radio" name="orient" value="portrait"><span>Hochformat</span></label>
+            <label><input type="radio" name="orient" value="landscape"><span>Querformat</span></label>
           </div>
         </div>
         <div class="field" id="pdfMarginField">
-          <span>Seitenrand</span>
-          <div class="seg">
+          <span id="lblMargin">Seitenrand</span>
+          <div class="seg" role="radiogroup" aria-labelledby="lblMargin">
             <label><input type="radio" name="margin" value="0"><span>Ohne</span></label>
             <label><input type="radio" name="margin" value="5"><span>5 mm</span></label>
             <label><input type="radio" name="margin" value="10"><span>10 mm</span></label>
@@ -276,14 +286,14 @@
           </div>
         </div>
         <div class="field">
-          <span>Maximale Dateigröße</span>
-          <div class="seg">
+          <span id="lblMax">Maximale Dateigröße</span>
+          <div class="seg" role="radiogroup" aria-labelledby="lblMax">
             <label><input type="radio" name="maxsize" value="0"><span>Keine</span></label>
             <label><input type="radio" name="maxsize" value="1"><span>1 MB</span></label>
             <label><input type="radio" name="maxsize" value="2"><span>2 MB</span></label>
             <label><input type="radio" name="maxsize" value="5"><span>5 MB</span></label>
           </div>
-          <span class="muted small">Für E-Mail: Bilder werden nur so weit verkleinert, wie nötig.</span>
+          <span class="muted small">Für E-Mail: Bilder werden nur so weit verkleinert wie nötig.</span>
         </div>
       </div>
     </details>
@@ -386,10 +396,19 @@
     <label class="switch"><input id="setAutoShoot" type="checkbox"><span class="track"></span><span>Automatisch auslösen<br><span class="muted small">Foto wird gemacht, sobald das Dokument ruhig erkannt ist</span></span></label>
     <label class="switch"><input id="setBlurWarn" type="checkbox"><span class="track"></span><span>Unschärfe-Warnung<br><span class="muted small">Hinweis, wenn ein Foto unscharf wirkt – mit „Neu aufnehmen“</span></span></label>
     <label class="switch"><input id="setWideFov" type="checkbox"><span class="track"></span><span>Weites Sichtfeld<br><span class="muted small">Kamerabild ohne Zuschnitt (empfohlen für iPad), etwas geringere Auflösung</span></span></label>
-    <label class="switch"><input id="setOcr" type="checkbox"><span class="track"></span><span>Texterkennung (OCR)<br><span class="muted small">Text wird im Hintergrund erkannt, PDF wird durchsuchbar. Beim ersten Mal werden ca. 9 MB geladen.</span></span></label>
+    <label class="switch"><input id="setOcr" type="checkbox"><span class="track"></span><span>Texterkennung (OCR)<br><span class="muted small">Text wird im Hintergrund erkannt, PDF wird durchsuchbar. Beim ersten Start werden ca. 7 MB geladen, danach geht es offline.</span></span></label>
     <label class="switch"><input id="setAutoName" type="checkbox"><span class="track"></span><span>Dokumente automatisch benennen<br><span class="muted small">Name aus Datum, Absender und Art des Schreibens, z. B. „2026-11-05 Finanzamt Musterstadt Bescheid“ (braucht die Texterkennung)</span></span></label>
     <label class="switch"><input id="setAutoPdf" type="checkbox"><span class="track"></span><span>Nach dem Scannen automatisch PDF erstellen</span></label>
-    <p class="muted small">Alle Dokumente werden nur lokal in diesem Browser gespeichert.</p>
+    <div class="field backup">
+      <span>Datensicherung</span>
+      <p class="muted small" id="storageInfo">Alle Dokumente werden nur lokal in diesem Browser gespeichert.</p>
+      <div class="btn-row">
+        <button id="backupSave" class="btn" type="button"><svg class="ic"><use href="#i-save"/></svg>Ablage sichern</button>
+        <button id="backupLoad" class="btn" type="button"><svg class="ic"><use href="#i-restore"/></svg>Sicherung laden</button>
+      </div>
+      <p class="muted small">Die Sicherung ist eine ZIP-Datei mit allen Dokumenten (Fotos, Einstellungen je Seite, erkannter Text). Speichere sie z. B. in „Dateien“ oder iCloud Drive – damit lassen sich die Dokumente auch auf einem anderen Gerät wiederherstellen.</p>
+      <input id="backupFile" type="file" accept=".zip,application/zip" hidden>
+    </div>
   </form>
 </dialog>
 
@@ -400,6 +419,7 @@
 <script src="ocr.js"></script>
 <script src="pdfimport.js"></script>
 <script src="naming.js"></script>
+<script src="backup.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

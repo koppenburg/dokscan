@@ -322,7 +322,7 @@
         meta.append(sn);
       }
       open.append(thumbEl, meta);
-      open.setAttribute('aria-label', `${d.name} öffnen`);
+      open.setAttribute('aria-label', `${d.name}, ${d.pageCount === 1 ? '1 Seite' : `${d.pageCount} Seiten`}, ${fmtDate(d.updated)} – öffnen`);
       const more = document.createElement('button');
       more.type = 'button';
       more.className = 'icon-btn doc-more';
@@ -337,6 +337,7 @@
     $('#libSearchWrap').hidden = n === 0;
     $('#libNoHits').hidden = !(n && q && !shown);
     $('#libInfo').textContent = n === 0 ? 'Keine Dokumente' : n === 1 ? '1 Dokument' : `${n} Dokumente`;
+    updateHomeHint();
   }
 
   function renderDocHeader() {
@@ -344,6 +345,7 @@
     $('#docName').textContent = d ? d.name : 'Neues Dokument';
     const n = pages.length;
     $('#docInfo').textContent = n === 0 ? 'Keine Seiten' : n === 1 ? '1 Seite' : `${n} Seiten`;
+    $('#docTitle').setAttribute('aria-label', `${d ? d.name : 'Neues Dokument'}, ${$('#docInfo').textContent} – umbenennen`);
   }
 
   /** Dokument öffnen (Seiten aus dem Speicher laden) und Dokumentansicht zeigen. */
@@ -793,6 +795,7 @@
       }
     }
     } finally { importing--; }
+    if (images > 1) toast(ok === 1 ? '1 Seite importiert.' : `${ok} Seiten importiert.`);
     return ok;
   }
 
@@ -888,7 +891,10 @@
 
   function fillCard(li, p, i) {
     li.querySelector('.card-num').textContent = String(i + 1);
-    li.querySelector('.card-open').setAttribute('aria-label', `Seite ${i + 1} bearbeiten`);
+    const lvlA = p.pending ? 0 : blurLevel(p);
+    const open = li.querySelector('.card-open');
+    open.setAttribute('aria-label', `Seite ${i + 1}${p.error ? ', Fehler' : ''}${lvlA ? ', unscharf' : ''}${p.pending ? ', wird bearbeitet' : ''} – ${sel.on ? 'auswählen' : 'bearbeiten'}`);
+    if (sel.on) open.setAttribute('aria-pressed', String(sel.ids.has(p.id))); else open.removeAttribute('aria-pressed');
     const url = urlFor(p, 'thumb');
     const img = li.querySelector('img');
     if (url && img.getAttribute('src') !== url) img.src = url;
@@ -927,7 +933,7 @@
     renderSelection();
   }
   function renderSelection() {
-    for (const li of grid.children) li.classList.toggle('selected', sel.ids.has(li.dataset.id));
+    grid.querySelectorAll(':scope > li').forEach((li, i) => { li.classList.toggle('selected', sel.ids.has(li.dataset.id)); if (pages[i]) fillCard(li, pages[i], i); });
     const n = sel.ids.size;
     $('#selCount').textContent = n === 0 ? 'Seiten auswählen' : n === 1 ? '1 Seite ausgewählt' : `${n} Seiten ausgewählt`;
     $('#selAll').textContent = n === pages.length && n > 0 ? 'Keine' : 'Alle';
@@ -953,17 +959,38 @@
   });
   $('#selRotL').addEventListener('click', () => { selectedPages().forEach((p) => rotatePageBy(p, -1)); });
   $('#selRotR').addEventListener('click', () => { selectedPages().forEach((p) => rotatePageBy(p, 1)); });
+  /** Seiten löschen – mit „Rückgängig“ statt Rückfrage. */
+  function deletePages(list) {
+    if (!list.length) return;
+    const doc = currentDoc;
+    const removed = list.map((p) => ({ p, i: pages.indexOf(p) })).filter((x) => x.i >= 0).sort((a, b) => a.i - b.i);
+    for (const { p } of removed) { p.deleted = true; DB.del(p.id); dropUrls(p); }
+    pages = pages.filter((p) => !p.deleted);
+    persistAll();
+    if (doc) touchDoc(doc.id);
+    renderGrid();
+    const n = removed.length;
+    toast(n === 1 ? `Seite ${removed[0].i + 1} gelöscht.` : `${n} Seiten gelöscht.`, {
+      label: 'Rückgängig',
+      onClick: () => {
+        if (currentDoc !== doc || !docAlive(doc)) { toast('Rückgängig nicht mehr möglich.'); return; }
+        for (const { p, i } of removed) {
+          p.deleted = false;
+          pages.splice(Math.min(i, pages.length), 0, p);
+          if (!p.processed || p.pending) { p.pending = false; schedule(p); }
+        }
+        persistAll();
+        renderGrid();
+        if (sel.on) renderSelection();
+        toast(n === 1 ? 'Seite wiederhergestellt.' : `${n} Seiten wiederhergestellt.`);
+      },
+    });
+  }
   $('#selDelete').addEventListener('click', () => {
     const list = selectedPages();
     if (!list.length) return;
-    if (!confirm(list.length === 1 ? '1 Seite löschen?' : `${list.length} Seiten löschen?`)) return;
-    for (const p of list) { p.deleted = true; DB.del(p.id); dropUrls(p); }
-    pages = pages.filter((p) => !p.deleted);
-    persistAll();
-    if (currentDoc) touchDoc(currentDoc.id);
-    renderGrid();
+    deletePages(list);
     setSelecting(pages.length > 0);
-    toast(list.length === 1 ? '1 Seite gelöscht.' : `${list.length} Seiten gelöscht.`);
   });
 
   // Umsortieren per Ziehen am Griff. Die Zeiger-Erfassung liegt auf dem Raster (nicht auf dem Griff),
@@ -1030,12 +1057,28 @@
   // Ansichten liegen als Stapel übereinander: Ablage → Dokument → Editor/Kamera
   const stack = [];
   const topScreen = () => stack[stack.length - 1] || null;
+  const openers = new Map(); // Ansicht → Element, das sie geöffnet hat (Fokus zurück beim Schließen)
+  /** Nur die oberste Ansicht ist bedienbar (Tastatur/VoiceOver erreichen nichts dahinter). */
+  function syncInert() {
+    const top = topScreen();
+    $('#app').inert = !!top;
+    for (const n of ['docview', 'camera', 'editor']) $('#' + n).inert = n !== top;
+    // sichtbarer Hinweis an die neue Ansicht anpassen (z. B. von der Kamera zurück in den Editor)
+    const t = $('#toast');
+    if (t.classList.contains('show') && t.parentNode === document.body) requestAnimationFrame(() => { t.style.bottom = toastBottom(); });
+  }
   function openScreen(name) {
     if (stack.includes(name)) return;
+    openers.set(name, document.activeElement);
     stack.push(name);
-    $('#' + name).hidden = false;
-    $('#' + name).style.zIndex = String(10 + stack.length); // zuletzt geöffnete Ansicht liegt oben
+    const el = $('#' + name);
+    el.hidden = false;
+    el.style.zIndex = String(10 + stack.length); // zuletzt geöffnete Ansicht liegt oben
     document.body.classList.add('screen-open');
+    syncInert();
+    // Fokus in die neue Ansicht (Überschrift bzw. erstes Bedienelement)
+    const target = el.querySelector('h2[tabindex], [data-autofocus]') || el.querySelector('button:not([hidden]):not(:disabled)');
+    if (target) setTimeout(() => { try { target.focus({ preventScroll: true }); } catch { /* egal */ } }, 0);
     try { history.pushState({ dokscan: stack.length }, ''); } catch { /* egal */ }
   }
   function closeScreen() {
@@ -1047,6 +1090,10 @@
     const name = stack.pop();
     $('#' + name).hidden = true;
     if (!stack.length) document.body.classList.remove('screen-open');
+    syncInert();
+    const back = openers.get(name);
+    openers.delete(name);
+    if (back && back.isConnected && !back.closest('[inert]')) setTimeout(() => { try { back.focus({ preventScroll: true }); } catch { /* egal */ } }, 0);
     if (name === 'camera') onCameraClosed();
     if (name === 'editor') onEditorClosed();
     if (name === 'docview') onDocClosed();
@@ -1621,7 +1668,10 @@
     } catch { cam.torch = false; toast('Licht wird nicht unterstützt.'); }
   });
   document.addEventListener('keydown', (e) => {
-    if (topScreen() === 'camera' && (e.code === 'Space' || e.code === 'Enter') && !e.repeat) { e.preventDefault(); shoot(); }
+    if (topScreen() !== 'camera' || e.repeat || !(e.code === 'Space' || e.code === 'Enter')) return;
+    if (e.target && e.target.closest && e.target.closest('button, input, select, textarea, a, [role="button"]')) return; // Knopf bedienen
+    e.preventDefault();
+    shoot();
   });
   document.addEventListener('visibilitychange', () => {
     if (topScreen() !== 'camera') return;
@@ -1727,11 +1777,49 @@
     updateEditor();
   }
 
+  /** Zur vorherigen/nächsten Seite blättern (Pfeile am Bildrand, Wischen, Pfeiltasten). */
+  function goToPage(delta) {
+    const p = editor.page;
+    if (!p || editor.crop || adj.on) return;
+    const j = pages.indexOf(p) + delta;
+    if (j < 0 || j >= pages.length) return;
+    editor.page = pages[j];
+    updateEditor();
+  }
+  function updateNav(busy) {
+    const i = pages.indexOf(editor.page);
+    const off = busy || !!editor.crop || adj.on || i < 0;
+    $('#edPrev').hidden = off || i <= 0;
+    $('#edNext').hidden = off || i >= pages.length - 1;
+  }
+  $('#edPrev').addEventListener('click', () => goToPage(-1));
+  $('#edNext').addEventListener('click', () => goToPage(1));
+  {
+    let sx = null, sy = 0;
+    const stage = $('#edPreviewWrap');
+    stage.addEventListener('pointerdown', (e) => { if (e.isPrimary) { sx = e.clientX; sy = e.clientY; } });
+    stage.addEventListener('pointerup', (e) => {
+      if (sx === null) return;
+      const dx = e.clientX - sx, dy = e.clientY - sy;
+      sx = null;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) goToPage(dx < 0 ? 1 : -1);
+    });
+    stage.addEventListener('pointercancel', () => { sx = null; });
+    stage.addEventListener('dragstart', (e) => e.preventDefault()); // Bild nicht als Datei ziehen
+  }
+  document.addEventListener('keydown', (e) => {
+    if (topScreen() !== 'editor' || document.querySelector('dialog[open]')) return;
+    if (e.target && e.target.closest && e.target.closest('input, textarea, select')) return;
+    if (e.key === 'ArrowLeft') goToPage(-1);
+    else if (e.key === 'ArrowRight') goToPage(1);
+  });
+
   function updateEditor() {
     const p = editor.page;
     if (!p) return;
     const i = pages.indexOf(p);
     $('#edTitle').textContent = `Seite ${i + 1} von ${pages.length}`;
+    updateNav();
     $('#edMovePrev').disabled = i <= 0;
     $('#edMoveNext').disabled = i >= pages.length - 1;
     markChips($('#filterChips'), p.filter);
@@ -1784,6 +1872,7 @@
     adj.mode = p.filter;
     $('#edTools').hidden = true;
     $('#adjTools').hidden = false;
+    updateNav(true);
     $('#edRetake').hidden = $('#edDelete').hidden = true;
     setAdjValues(p.bright || 0, p.contrast || 0);
     adj.loading = true;
@@ -1847,6 +1936,7 @@
     cv.hidden = true; cv.width = 0; cv.height = 0;
     $('#adjTools').hidden = true;
     $('#edTools').hidden = false;
+    updateNav();
     $('#edRetake').hidden = $('#edDelete').hidden = false;
     if (p && mode === 'apply' && ((p.bright || 0) !== b || (p.contrast || 0) !== c)) {
       p.bright = b; p.contrast = c;
@@ -1951,15 +2041,9 @@
   $('#edRotR').addEventListener('click', () => rotatePage(1));
   $('#edDelete').addEventListener('click', () => {
     const p = editor.page;
-    if (!p || !confirm(`Seite ${pages.indexOf(p) + 1} löschen?`)) return;
-    pages = pages.filter((x) => x !== p);
-    p.deleted = true;
-    DB.del(p.id);
-    persistAll();
-    touchDoc(p.docId);
-    dropUrls(p);
-    renderGrid();
+    if (!p) return;
     closeScreen();
+    deletePages([p]);
   });
 
   // ---------- Zuschnitt ----------
@@ -1973,6 +2057,7 @@
     cropWrap.hidden = !on;
     $('#edTools').hidden = on;
     $('#cropTools').hidden = !on;
+    updateNav(on);
   }
 
   async function startCrop() {
@@ -2058,7 +2143,7 @@
     lc.stroke();
     lc.restore();
     const wr = cropWrap.getBoundingClientRect();
-    const lx = clientX - wr.left - size / 2;
+    const lx = Math.max(-wr.left + 4, Math.min(window.innerWidth - wr.left - size - 4, clientX - wr.left - size / 2));
     let ly = clientY - wr.top - size - 56;
     if (clientY - size - 56 < 8) ly = clientY - wr.top + 56;
     loupe.style.transform = `translate(${Math.round(lx)}px, ${Math.round(ly)}px)`;
@@ -2125,7 +2210,7 @@
 
   // ---------- PDF ----------
   const pdfDialog = $('#pdfDialog');
-  const pdfState = { blob: null, url: null, busy: false };
+  const pdfState = { blob: null, url: null, busy: false, ocr: true };
 
   function defaultName() {
     const d = new Date();
@@ -2165,6 +2250,7 @@
     setRadio('margin', String(settings.margin));
     setRadio('maxsize', String(settings.maxSize));
     $('#pdfOcr').checked = settings.ocr;
+    pdfState.ocr = settings.ocr;
     $('#pdfLock').checked = false;
     $('#pdfPw').value = '';
     $('#pdfPw').type = 'password';
@@ -2184,7 +2270,7 @@
     settings.orient = getRadio('orient') || 'auto';
     settings.margin = Number(getRadio('margin') || 0);
     settings.maxSize = Number(getRadio('maxsize') || 0);
-    settings.ocr = $('#pdfOcr').checked;
+    pdfState.ocr = $('#pdfOcr').checked; // nur für dieses PDF – die Einstellung „Texterkennung“ bleibt
     saveSettings();
   }
   function updatePdfOptionUi() {
@@ -2311,13 +2397,20 @@
       const password = $('#pdfLock').checked ? $('#pdfPw').value : '';
       if ($('#pdfLock').checked && password.length < 4) throw new Error('Bitte ein Passwort mit mindestens 4 Zeichen eingeben.');
       if (!isIdle()) {
-        text.textContent = 'Seiten werden noch bearbeitet …';
-        await whenIdle();
+        const total = pages.length;
+        const upd = () => {
+          const left = pages.filter((p) => p.pending || !p.processed).length;
+          text.textContent = left ? `Seiten werden noch bearbeitet … (${total - left} von ${total} fertig)` : 'Seiten werden noch bearbeitet …';
+          bar.style.width = `${Math.round((total - left) / Math.max(1, total) * 30)}%`;
+        };
+        upd();
+        const iv = setInterval(upd, 400);
+        try { await whenIdle(); } finally { clearInterval(iv); }
       }
       if (!pages.length) throw new Error('Das Dokument hat keine Seiten.');
       const blob = await buildPdf({
         format: settings.format, orient: settings.orient, margin: settings.margin,
-        quality: settings.quality, maxBytes: settings.maxSize * 1024 * 1024, ocr: settings.ocr, password,
+        quality: settings.quality, maxBytes: settings.maxSize * 1024 * 1024, ocr: pdfState.ocr, password,
       }, (i, n, ocr) => {
         const part = ocr && ocr.recognizing ? ocr.progress : 0;
         bar.style.width = `${Math.round(((i + part) / n) * 100)}%`;
@@ -2330,7 +2423,7 @@
       pdfState.url = URL.createObjectURL(blob);
       $('#pdfResName').textContent = fileName();
       $('#pdfResMeta').textContent = `${pages.length} ${pages.length === 1 ? 'Seite' : 'Seiten'} · ${fmtSize(blob.size)}` +
-        (settings.ocr ? (blob.ocrFailed ? ' · ohne Texterkennung (nicht verfügbar)' : ' · durchsuchbar') : '') +
+        (pdfState.ocr ? (blob.ocrFailed ? ' · ohne Texterkennung (nicht verfügbar)' : ' · durchsuchbar') : '') +
         (settings.maxSize ? (blob.fitsTarget ? ` · unter ${settings.maxSize} MB` : ` · ${settings.maxSize} MB nicht erreichbar`) : '') +
         (password ? ' · passwortgeschützt' : '');
       $('#pdfShare').hidden = !canShareFile(blob);
@@ -2420,9 +2513,16 @@
     $('#setOcr').checked = settings.ocr;
     $('#setBlurWarn').checked = settings.blurWarn;
     $('#setAutoName').checked = settings.autoName;
+    syncSettingDeps();
+    refreshStorageInfo();
     setDialog.showModal();
   });
-  $('#setAutoCrop').addEventListener('change', (e) => { settings.autoCrop = e.target.checked; saveSettings(); });
+  function syncSettingDeps() {
+    const on = settings.autoCrop;
+    $('#setAutoShoot').disabled = !on;
+    $('#setAutoShoot').closest('label').classList.toggle('disabled', !on);
+  }
+  $('#setAutoCrop').addEventListener('change', (e) => { settings.autoCrop = e.target.checked; saveSettings(); syncSettingDeps(); });
   $('#setAutoPdf').addEventListener('change', (e) => { settings.autoPdf = e.target.checked; saveSettings(); });
   $('#setWideFov').addEventListener('change', (e) => { settings.wideFov = e.target.checked; saveSettings(); });
   $('#setAutoName').addEventListener('change', (e) => {
@@ -2440,22 +2540,142 @@
   setDialog.addEventListener('click', (e) => { if (e.target === setDialog) setDialog.close(); });
 
 
+  // ---------- Datensicherung ----------
+  const isoDay = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  /** Datei teilen (iOS: „In Dateien sichern“) oder herunterladen. */
+  async function shareOrDownload(file) {
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: file.name }); return true; }
+    } catch (e) {
+      if (e && e.name === 'AbortError') return false;
+    }
+    const url = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = url; a.download = file.name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    return true;
+  }
+  async function refreshStorageInfo() {
+    const el = $('#storageInfo');
+    const parts = ['Alle Dokumente werden nur auf diesem Gerät gespeichert.'];
+    try {
+      if (navigator.storage && navigator.storage.estimate) {
+        const { usage, quota } = await navigator.storage.estimate();
+        if (usage != null) parts.push(`Belegt: ${fmtSize(usage)}${quota ? ` von ${fmtSize(quota)}` : ''}.`);
+      }
+      if (navigator.storage && navigator.storage.persisted) {
+        parts.push((await navigator.storage.persisted()) ? 'Der Speicher ist vor automatischem Löschen geschützt.' : 'Der Browser darf die Daten bei Platzmangel oder längerer Nichtnutzung löschen – bitte regelmäßig sichern.');
+      }
+    } catch { /* egal */ }
+    let last = 0;
+    try { last = Number(localStorage.getItem('dokscan.lastBackup') || 0); } catch { /* egal */ }
+    parts.push(last ? `Letzte Sicherung: ${fmtDate(last)}.` : 'Noch keine Sicherung.');
+    el.textContent = parts.join(' ');
+  }
+  $('#backupSave').addEventListener('click', async () => {
+    const btn = $('#backupSave');
+    if (!docs.length) { toast('Die Ablage ist leer.'); return; }
+    btn.disabled = true;
+    try {
+      toast('Sicherung wird vorbereitet …', null, 60000);
+      await whenIdle();
+      const res = await Backup.create(docs.slice(), async (id) => {
+        const recs = (await DB.pagesOf(id)) || [];
+        return recs.map((r) => (inflight.has(r.id) ? record(inflight.get(r.id)) : r));
+      }, (i, n) => { if (i % 10 === 0 || i === n) toast(`Sicherung wird erstellt … ${Math.round((i / n) * 100)} %`, null, 60000); });
+      const file = new File([res.blob], `DokScan-Sicherung-${isoDay(Date.now())}.zip`, { type: 'application/zip' });
+      const summary = `${res.docs === 1 ? '1 Dokument' : `${res.docs} Dokumente`}, ${res.pages === 1 ? '1 Seite' : `${res.pages} Seiten`} · ${fmtSize(file.size)}`;
+      // Teilen braucht eine frische Nutzeraktion → eigener Knopf
+      toast(`Sicherung fertig (${summary}).`, {
+        label: 'Speichern',
+        onClick: async () => {
+          if (await shareOrDownload(file)) {
+            try { localStorage.setItem('dokscan.lastBackup', String(Date.now())); } catch { /* egal */ }
+            refreshStorageInfo();
+          }
+        },
+      }, 60000);
+    } catch (e) {
+      console.error(e);
+      toast(`Sicherung fehlgeschlagen: ${e.message || e}`, null, 7000);
+    } finally { btn.disabled = false; }
+  });
+  $('#backupLoad').addEventListener('click', () => $('#backupFile').click());
+  $('#backupFile').addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    try {
+      toast('Sicherung wird gelesen …', null, 60000);
+      const data = await Backup.read(f);
+      const known = new Set(docs.map((d) => d.id));
+      const fresh = data.docs.filter((d) => !known.has(d.id));
+      const ids = new Set(fresh.map((d) => d.id));
+      const freshPages = data.pages.filter((p) => ids.has(p.docId));
+      const skipped = data.docs.length - fresh.length;
+      if (!fresh.length) { toast('Alle Dokumente dieser Sicherung sind bereits vorhanden.', null, 5000); return; }
+      const msg = `${fresh.length === 1 ? '1 Dokument' : `${fresh.length} Dokumente`} mit ${freshPages.length === 1 ? '1 Seite' : `${freshPages.length} Seiten`} wiederherstellen?`
+        + (skipped ? `\n${skipped} ${skipped === 1 ? 'ist' : 'sind'} bereits vorhanden und ${skipped === 1 ? 'wird' : 'werden'} übersprungen.` : '');
+      if (!confirm(msg)) { toast('Wiederherstellen abgebrochen.'); return; }
+      for (let i = 0; i < freshPages.length; i += 20) await DB.putMany(freshPages.slice(i, i + 20));
+      for (const d of fresh) { docs.push(d); await DB.putDoc(d); }
+      renderLibrary();
+      setDialog.close();
+      toast(`${fresh.length === 1 ? '1 Dokument' : `${fresh.length} Dokumente`} wiederhergestellt.`, null, 4000);
+    } catch (err) {
+      console.error(err);
+      toast(err.message || 'Die Sicherung konnte nicht gelesen werden.', null, 7000);
+    }
+  });
+
+  // Hinweis für Safari ohne Home-Bildschirm: Daten können sonst gelöscht werden
+  function updateHomeHint() {
+    let closed = false;
+    try { closed = localStorage.getItem('dokscan.homeHint') === 'closed'; } catch { /* egal */ }
+    const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+    const standalone = navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+    $('#homeHint').hidden = closed || !ios || standalone || docs.length === 0;
+  }
+  $('#homeHintClose').addEventListener('click', () => {
+    try { localStorage.setItem('dokscan.homeHint', 'closed'); } catch { /* egal */ }
+    updateHomeHint();
+  });
+
   // ---------- Toast ----------
   let toastTimer = null;
   let toastHandler = null;
   /** Kurzer Hinweis; optional mit Aktion, z. B. { label: 'Rückgängig', onClick } */
   function toast(msg, action, ms) {
     const t = $('#toast');
+    const host = [...document.querySelectorAll('dialog[open]')].pop() || document.body;
+    if (t.parentNode !== host) host.appendChild(t);
     $('#toastText').textContent = msg;
     const btn = $('#toastAction');
     toastHandler = action ? action.onClick : null;
     btn.hidden = !action;
     if (action) btn.textContent = action.label;
-    t.style.bottom = topScreen() === 'camera' ? 'calc(env(safe-area-inset-bottom) + 190px)' : '';
+    // nichts verdecken: über der Werkzeugleiste der aktuellen Ansicht, in Dialogen am oberen Rand
+    t.classList.toggle('top', host !== document.body);
+    t.style.bottom = host !== document.body ? '' : toastBottom();
     t.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { t.classList.remove('show'); toastHandler = null; }, ms || (action ? 6000 : 2800));
   }
+  function toastBottom() {
+    const top = topScreen();
+    if (top === 'camera') return 'calc(env(safe-area-inset-bottom) + 190px)';
+    const root = top ? $('#' + top) : $('#app');
+    const bars = [...root.querySelectorAll('.bottombar, .ed-tools, .sel-tools, .blur-note')].filter((el) => el.getClientRects().length);
+    if (!bars.length) return '';
+    const y = Math.min(...bars.map((el) => el.getBoundingClientRect().top));
+    return `${Math.max(16, Math.round(window.innerHeight - y + 12))}px`;
+  }
+  // Dialog geschlossen → Hinweis zurück in die Seite
+  document.querySelectorAll('dialog').forEach((d) => d.addEventListener('close', () => {
+    const t = $('#toast');
+    if (t.parentNode === d) document.body.appendChild(t);
+  }));
   $('#toastAction').addEventListener('click', () => {
     const f = toastHandler;
     toastHandler = null;
@@ -2516,5 +2736,5 @@
   init();
 
   // Für Tests
-  window.DokScan = { get pages() { return pages; }, get docs() { return docs; }, get currentDoc() { return currentDoc; }, get liveCount() { return live.count || 0; }, whenIdle, addFiles, buildPdf, settings, workerReady: () => Proc.init(), ensureOcr, openDoc, importInto };
+  window.DokScan = { backupFile: async () => (await Backup.create(docs.slice(), (id) => DB.pagesOf(id))).blob, get pages() { return pages; }, get docs() { return docs; }, get currentDoc() { return currentDoc; }, get liveCount() { return live.count || 0; }, whenIdle, addFiles, buildPdf, settings, workerReady: () => Proc.init(), ensureOcr, openDoc, importInto };
 })();
