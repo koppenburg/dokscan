@@ -228,10 +228,10 @@
 
 <!-- PDF -->
 <dialog id="pdfDialog" class="sheet-dialog" aria-labelledby="pdfTitle">
-  <form method="dialog" class="sheet-body">
+  <form method="dialog" class="sheet-body" id="pdfForm">
     <header class="sheet-head">
       <h2 id="pdfTitle">PDF erstellen</h2>
-      <button class="icon-btn" value="close" aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
     </header>
     <label class="field">
       <span>Dateiname</span>
@@ -325,7 +325,7 @@
   <form method="dialog" class="sheet-body">
     <header class="sheet-head">
       <h2 id="textTitle">Erkannter Text</h2>
-      <button class="icon-btn" value="close" aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
     </header>
     <div id="textProgress" class="progress" hidden>
       <div class="progress-bar"><span id="textProgressBar"></span></div>
@@ -342,7 +342,7 @@
   <form method="dialog" class="sheet-body" id="nameForm">
     <header class="sheet-head">
       <h2 id="nameTitle">Dokument umbenennen</h2>
-      <button class="icon-btn" value="close" aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
     </header>
     <label class="field">
       <span>Name</span>
@@ -362,7 +362,7 @@
   <form method="dialog" class="sheet-body">
     <header class="sheet-head">
       <h2 id="docMenuTitle">Dokument</h2>
-      <button class="icon-btn" value="close" aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
     </header>
     <button id="menuOpen" class="btn wide menu-btn" type="button"><svg class="ic"><use href="#i-eye"/></svg>Öffnen</button>
     <button id="menuPdf" class="btn wide menu-btn" type="button"><svg class="ic"><use href="#i-pdf"/></svg>PDF erstellen &amp; teilen</button>
@@ -376,7 +376,7 @@
   <form method="dialog" class="sheet-body">
     <header class="sheet-head">
       <h2 id="setTitle">Einstellungen</h2>
-      <button class="icon-btn" value="close" aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
     </header>
     <div class="field">
       <span>Standardfilter für neue Seiten</span>
