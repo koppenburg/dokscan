@@ -45,6 +45,8 @@
     <symbol id="i-dots" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3.4"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
     <symbol id="i-warn" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
+    <symbol id="i-select" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 12 3 3 5-6"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   </defs>
 </svg>
@@ -89,26 +91,40 @@
 <!-- Dokument -->
 <section id="docview" class="screen docview" hidden aria-label="Dokument">
   <header class="topbar doc-top">
-    <button id="docBack" class="icon-btn" type="button" aria-label="Zur Ablage"><svg class="ic"><use href="#i-left"/></svg></button>
-    <button id="docTitle" class="doc-title" type="button" aria-label="Dokument umbenennen">
+    <div class="sel-head sel-only">
+      <button id="selDone" class="pill-btn" type="button">Fertig</button>
+      <span id="selCount" class="sel-count">Seiten auswählen</span>
+      <button id="selAll" class="pill-btn" type="button">Alle</button>
+    </div>
+    <button id="docBack" class="icon-btn no-sel" type="button" aria-label="Zur Ablage"><svg class="ic"><use href="#i-left"/></svg></button>
+    <button id="docTitle" class="doc-title no-sel" type="button" aria-label="Dokument umbenennen">
       <span class="doc-name-row"><span id="docName">Dokument</span><svg class="ic ic-sm"><use href="#i-pencil"/></svg></span>
       <span id="docInfo" class="muted small">Keine Seiten</span>
     </button>
-    <button id="docDelete" class="icon-btn danger" type="button" aria-label="Dokument löschen" title="Dokument löschen"><svg class="ic"><use href="#i-trash"/></svg></button>
+    <button id="docSelect" class="pill-btn no-sel" type="button" title="Mehrere Seiten auswählen"><svg class="ic"><use href="#i-select"/></svg><span>Auswählen</span></button>
+    <button id="docDelete" class="icon-btn danger no-sel" type="button" aria-label="Dokument löschen" title="Dokument löschen"><svg class="ic"><use href="#i-trash"/></svg></button>
   </header>
   <main id="overview">
     <p id="docEmpty" class="muted center doc-empty" hidden>Noch keine Seiten. Tippe auf <b>Scannen</b> oder <b>Importieren</b>.</p>
     <ol id="pageGrid" class="grid" aria-label="Seiten"></ol>
     <p id="gridHint" class="muted small hint" hidden>Tippe auf eine Seite zum Bearbeiten · Halte <svg class="ic ic-inline"><use href="#i-grip"/></svg> gedrückt und ziehe, um die Reihenfolge zu ändern.</p>
   </main>
-  <footer class="bottombar">
+  <footer class="bottombar no-sel">
     <button id="btnImport" class="bar-btn" type="button"><svg class="ic"><use href="#i-image"/></svg><span>Importieren</span></button>
     <button id="btnScan" class="scan-btn" type="button" aria-label="Seiten scannen"><svg class="ic"><use href="#i-camera"/></svg></button>
     <button id="btnPdf" class="bar-btn" type="button" disabled><svg class="ic"><use href="#i-pdf"/></svg><span>PDF</span></button>
   </footer>
+  <footer id="selTools" class="ed-tools sel-tools sel-only">
+    <div class="chips" id="selFilter" role="group" aria-label="Filter für ausgewählte Seiten"></div>
+    <div class="tool-row">
+      <button id="selRotL" class="tool" type="button"><svg class="ic"><use href="#i-rot-l"/></svg><span>Links drehen</span></button>
+      <button id="selRotR" class="tool" type="button"><svg class="ic"><use href="#i-rot-r"/></svg><span>Rechts drehen</span></button>
+      <button id="selDelete" class="tool danger-tool" type="button"><svg class="ic"><use href="#i-trash"/></svg><span>Löschen</span></button>
+    </div>
+  </footer>
 </section>
 
-<input id="fileImport" type="file" accept="image/*" multiple hidden>
+<input id="fileImport" type="file" accept="image/*,application/pdf,.pdf" multiple hidden>
 <input id="fileCapture" type="file" accept="image/*" capture="environment" hidden>
 
 <!-- Kamera -->
@@ -256,6 +272,13 @@
       </div>
     </details>
 
+    <label class="switch"><input id="pdfLock" type="checkbox"><span class="track"></span><span>Mit Passwort schützen<br><span class="muted small">PDF lässt sich nur mit Passwort öffnen (AES-256)</span></span></label>
+    <div id="pdfPwField" class="field" hidden>
+      <span>Passwort</span>
+      <span class="input-suffix pw-input"><input id="pdfPw" type="password" autocomplete="new-password" spellcheck="false" placeholder="mindestens 4 Zeichen"><button id="pdfPwShow" class="pw-toggle" type="button" aria-label="Passwort anzeigen"><svg class="ic"><use href="#i-eye"/></svg></button></span>
+      <span class="muted small">Gut merken: Ohne Passwort lässt sich das PDF nicht mehr öffnen. Das Passwort wird nicht gespeichert.</span>
+    </div>
+
     <label class="switch"><input id="pdfOcr" type="checkbox"><span class="track"></span><span>Texterkennung<br><span class="muted small">PDF wird durchsuchbar, Text lässt sich markieren und kopieren</span></span></label>
 
     <div id="pdfProgress" class="progress" hidden>
@@ -357,6 +380,7 @@
 <script src="pdf.js"></script>
 <script src="imaging.js"></script>
 <script src="ocr.js"></script>
+<script src="pdfimport.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

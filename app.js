@@ -102,7 +102,7 @@
   const record = (p) => ({
     id: p.id, docId: p.docId, order: p.order, created: p.created, original: p.original,
     rotation: p.rotation, corners: p.corners, filter: p.filter, autoDetect: !!(p.autoDetect && !p.processed),
-    processed: p.processed, pw: p.pw, ph: p.ph, thumb: p.thumb, procKey: p.procKey, ocr: p.ocr, blur: p.blur,
+    processed: p.processed, pw: p.pw, ph: p.ph, thumb: p.thumb, procKey: p.procKey, ocr: p.ocr, blur: p.blur, pdfText: p.pdfText || null,
   });
   const persist = (p) => {
     if (p.deleted || !p.docId) return;
@@ -273,6 +273,7 @@
   }
 
   function onDocClosed() {
+    setSelecting(false);
     pages.forEach(dropUrls);
     pages = [];
     currentDoc = null;
@@ -544,11 +545,16 @@
     return track(Img.toBlob(c, 'image/jpeg', 0.92).then((original) => addOriginal(original, hint)));
   }
 
-  function addOriginal(original, hint) {
+  function addOriginal(original, hint, opts = {}) {
     // Ränder: vorläufig aus der Live-Erkennung, genau erkannt wird im Hintergrund auf dem vollen Bild
     const corners = (settings.autoCrop && hint) || Img.FULL.map((x) => x.slice());
     if (!currentDoc) currentDoc = newDoc();
-    const p = { id: uid(), docId: currentDoc.id, order: pages.length, created: Date.now(), original, rotation: 0, corners, filter: settings.filter, processed: null, thumb: null, autoDetect: settings.autoCrop };
+    const p = {
+      id: uid(), docId: currentDoc.id, order: pages.length, created: Date.now(), original, rotation: 0, corners,
+      filter: opts.filter || settings.filter, processed: null, thumb: null,
+      autoDetect: opts.autoDetect != null ? opts.autoDetect : settings.autoCrop,
+      pdfText: opts.pdfText || null,
+    };
     pages.push(p);
     renderGrid();
     persist(p);
@@ -583,11 +589,44 @@
     });
   }
 
+  /** PDF importieren: jede Seite als Bild (ohne Zuschnitt, Filter „Original“), vorhandener Text wird übernommen. */
+  async function addPdf(file) {
+    let n = 0, total = 0;
+    const gen = PdfImport.pages(file, {
+      askPassword: (wrong) => prompt(wrong ? 'Falsches Passwort. Bitte erneut eingeben:' : `„${file.name}“ ist passwortgeschützt. Passwort:`),
+      onStart: (t) => {
+        total = t;
+        if (t > 200 && !confirm(`Das PDF hat ${t} Seiten. Wirklich alle importieren?`)) throw Object.assign(new Error('Import abgebrochen'), { cancelled: true });
+      },
+    });
+    toast('PDF wird geöffnet …');
+    for await (const pg of gen) {
+      const job = Promise.resolve(addOriginal(pg.blob, null, {
+        autoDetect: false, filter: 'original',
+        pdfText: pg.text ? { ...pg.text, w: pg.w, h: pg.h } : null,
+      }));
+      await track(job);
+      n++;
+      toast(`PDF wird importiert: Seite ${n} von ${total} …`);
+    }
+    return n;
+  }
+
   async function addFiles(files) {
-    const list = [...files].filter((f) => f.type.startsWith('image/') || /\.(jpe?g|png|webp|heic|heif|gif|bmp)$/i.test(f.name));
+    const all = [...files];
+    const isImage = (f) => f.type.startsWith('image/') || /\.(jpe?g|png|webp|heic|heif|gif|bmp)$/i.test(f.name);
+    const list = all.filter((f) => isImage(f) || PdfImport.isPdf(f));
     if (!list.length) return 0;
     let ok = 0;
     for (const f of list) {
+      if (PdfImport.isPdf(f)) {
+        try { ok += await addPdf(f); }
+        catch (e) {
+          console.error(e);
+          toast(e.cancelled ? 'PDF-Import abgebrochen.' : `„${f.name}“ konnte nicht gelesen werden.`);
+        }
+        continue;
+      }
       try {
         const img = await Img.load(f);
         const c = Img.draw(img, MAX_DIM);
@@ -613,6 +652,16 @@
     const key = p.procKey;
     if (!p.processed || !key) return Promise.reject(new Error('Seite ist noch nicht fertig verarbeitet.'));
     if (p.ocr && p.ocr.key === key) return Promise.resolve(p.ocr);
+    // Seite aus einem PDF mit Text: Text direkt übernehmen (exakt, ohne Texterkennung), solange
+    // die Seite weder gedreht noch zugeschnitten wurde
+    if (p.pdfText && !p.rotation && Img.isFull(p.corners) && p.pw) {
+      const sx = p.pw / p.pdfText.w, sy = p.ph / p.pdfText.h;
+      const words = p.pdfText.words.map(([s, x0, y0, x1, y1, b, lh]) => [s, x0 * sx, y0 * sy, x1 * sx, y1 * sy, b * sy, lh * sy]);
+      const ocr = { key, text: p.pdfText.text, words, fromPdf: true };
+      p.ocr = ocr;
+      persist(p);
+      return Promise.resolve(ocr);
+    }
     if (p.ocrJob && p.ocrJob.key === key) {
       if (onProgress) p.ocrJob.listeners.add(onProgress);
       return p.ocrJob.promise;
@@ -662,6 +711,7 @@
     pages.forEach((p, i) => grid.appendChild(makeCard(p, i)));
     const n = pages.length;
     $('#docEmpty').hidden = n > 0;
+    $('#docSelect').hidden = n < 2;
     $('#gridHint').hidden = n < 2;
     $('#btnPdf').disabled = n === 0;
     renderDocHeader();
@@ -674,7 +724,8 @@
     li.innerHTML =
       `<button class="card-open" type="button"><img alt=""><span class="spinner"></span><span class="card-err">Fehler</span></button>` +
       `<span class="card-num"></span><span class="card-blur" hidden><svg class="ic"><use href="#i-warn"/></svg>unscharf</span>` +
-      `<span class="drag" role="button" tabindex="-1" aria-label="Verschieben"><svg class="ic"><use href="#i-grip"/></svg></span>`;
+      `<span class="drag" role="button" tabindex="-1" aria-label="Verschieben"><svg class="ic"><use href="#i-grip"/></svg></span>` +
+      `<span class="card-check"><svg class="ic"><use href="#i-check"/></svg></span>`;
     fillCard(li, p, i);
     return li;
   }
@@ -688,6 +739,7 @@
     img.hidden = !url;
     li.classList.toggle('loading', !!p.pending);
     li.classList.toggle('error', !!p.error);
+    li.classList.toggle('selected', sel.ids.has(p.id));
     const lvl = p.pending ? 0 : blurLevel(p);
     const badge = li.querySelector('.card-blur');
     badge.hidden = !lvl;
@@ -703,13 +755,65 @@
     const btn = e.target.closest('.card-open');
     if (!btn) return;
     const p = pages.find((x) => x.id === btn.closest('li').dataset.id);
-    if (p) openEditor(p);
+    if (!p) return;
+    if (sel.on) { if (sel.ids.has(p.id)) sel.ids.delete(p.id); else sel.ids.add(p.id); renderSelection(); return; }
+    openEditor(p);
+  });
+
+  // ---------- Mehrere Seiten auswählen und gemeinsam bearbeiten ----------
+  const sel = { on: false, ids: new Set() };
+  const selectedPages = () => pages.filter((p) => sel.ids.has(p.id));
+  function setSelecting(on) {
+    sel.on = on && pages.length > 0;
+    sel.ids.clear();
+    $('#docview').classList.toggle('selecting', sel.on);
+    if (sel.on) buildChips($('#selFilter'), null, applyFilterToSelection);
+    renderSelection();
+  }
+  function renderSelection() {
+    for (const li of grid.children) li.classList.toggle('selected', sel.ids.has(li.dataset.id));
+    const n = sel.ids.size;
+    $('#selCount').textContent = n === 0 ? 'Seiten auswählen' : n === 1 ? '1 Seite ausgewählt' : `${n} Seiten ausgewählt`;
+    $('#selAll').textContent = n === pages.length && n > 0 ? 'Keine' : 'Alle';
+    for (const id of ['#selRotL', '#selRotR', '#selDelete']) $(id).disabled = n === 0;
+    $('#selFilter').querySelectorAll('.chip').forEach((b) => { b.disabled = n === 0; });
+    // gemeinsamer Filter der Auswahl hervorheben
+    const fs = new Set(selectedPages().map((p) => p.filter));
+    markChips($('#selFilter'), fs.size === 1 ? [...fs][0] : null);
+  }
+  function applyFilterToSelection(f) {
+    const list = selectedPages();
+    if (!list.length) return;
+    for (const p of list) if (p.filter !== f) { p.filter = f; schedule(p); }
+    renderSelection();
+    const label = (FILTERS.find(([k]) => k === f) || [f, f])[1];
+    toast(`Filter „${label}“ für ${list.length === 1 ? '1 Seite' : `${list.length} Seiten`}.`);
+  }
+  $('#docSelect').addEventListener('click', () => setSelecting(true));
+  $('#selDone').addEventListener('click', () => setSelecting(false));
+  $('#selAll').addEventListener('click', () => {
+    if (sel.ids.size === pages.length) sel.ids.clear(); else pages.forEach((p) => sel.ids.add(p.id));
+    renderSelection();
+  });
+  $('#selRotL').addEventListener('click', () => { selectedPages().forEach((p) => rotatePageBy(p, -1)); });
+  $('#selRotR').addEventListener('click', () => { selectedPages().forEach((p) => rotatePageBy(p, 1)); });
+  $('#selDelete').addEventListener('click', () => {
+    const list = selectedPages();
+    if (!list.length) return;
+    if (!confirm(list.length === 1 ? '1 Seite löschen?' : `${list.length} Seiten löschen?`)) return;
+    for (const p of list) { p.deleted = true; DB.del(p.id); dropUrls(p); }
+    pages = pages.filter((p) => !p.deleted);
+    persistAll();
+    if (currentDoc) touchDoc(currentDoc.id);
+    renderGrid();
+    setSelecting(pages.length > 0);
+    toast(list.length === 1 ? '1 Seite gelöscht.' : `${list.length} Seiten gelöscht.`);
   });
 
   // Umsortieren per Ziehen am Griff
   grid.addEventListener('pointerdown', (e) => {
     const handle = e.target.closest('.drag');
-    if (!handle) return;
+    if (!handle || sel.on) return;
     e.preventDefault();
     const li = handle.closest('li');
     li.classList.add('dragging');
@@ -1297,6 +1401,12 @@
     if (!files || !files.length) return 0;
     if (newDocument) { pages.forEach(dropUrls); pages = []; currentDoc = null; }
     const n = await addFiles(files);
+    const firstPdf = [...files].find((f) => PdfImport.isPdf(f));
+    if (n && newDocument && currentDoc && firstPdf && !currentDoc.named) {
+      currentDoc.name = firstPdf.name.replace(/\.pdf$/i, '').slice(0, 120) || currentDoc.name;
+      currentDoc.named = true;
+      DB.putDoc(currentDoc);
+    }
     if (n && newDocument && currentDoc) await openDoc(currentDoc);
     return n;
   }
@@ -1326,7 +1436,7 @@
   $('#fileImport').addEventListener('change', async (e) => {
     const n = await importInto(e.target.files, importNewDoc);
     e.target.value = '';
-    if (n) toast(n === 1 ? '1 Bild importiert.' : `${n} Bilder importiert.`);
+    if (n) toast(n === 1 ? '1 Seite importiert.' : `${n} Seiten importiert.`);
   });
 
   // ---------- Editor ----------
@@ -1402,8 +1512,8 @@
     toast(`Jetzt Seite ${j + 1}`);
   }
 
-  function rotatePage(steps) {
-    const p = editor.page;
+  function rotatePage(steps) { rotatePageBy(editor.page, steps); }
+  function rotatePageBy(p, steps) {
     p.autoDetect = false;
     for (let k = 0; k < ((steps % 4) + 4) % 4; k++) p.corners = Img.rotateCornersCW(p.corners);
     p.rotation = (((p.rotation + steps * 90) % 360) + 360) % 360;
@@ -1671,6 +1781,10 @@
     setRadio('margin', String(settings.margin));
     setRadio('maxsize', String(settings.maxSize));
     $('#pdfOcr').checked = settings.ocr;
+    $('#pdfLock').checked = false;
+    $('#pdfPw').value = '';
+    $('#pdfPw').type = 'password';
+    $('#pdfPwField').hidden = true;
     // aufgeklappt, wenn vom Standard abweichend
     $('#pdfMore').open = settings.orient !== 'auto' || settings.margin !== 0 || settings.maxSize !== 0;
     updatePdfOptionUi();
@@ -1773,7 +1887,7 @@
         const text = o.ocr && p.ocr && p.ocr.key === p.procKey ? textLayer(p, L.x, L.y, L.iw / p.pw) : null;
         out.push({ jpeg: new Uint8Array(await im.blob.arrayBuffer()), pageWidth: L.pageW, pageHeight: L.pageH, x: L.x, y: L.y, w: L.iw, h: L.ih, text });
       }
-      return PDFWriter.build(out, { title: fileName().replace(/\.pdf$/, ''), producer: 'DokScan' });
+      return PDFWriter.build(out, { title: fileName().replace(/\.pdf$/, ''), producer: 'DokScan', password: o.password || null });
     };
     let level = QUALITY_LEVEL[o.quality] != null ? QUALITY_LEVEL[o.quality] : 2;
     let blob = await encodeAt(level);
@@ -1814,9 +1928,11 @@
         text.textContent = 'Seiten werden noch bearbeitet …';
         await whenIdle();
       }
+      const password = $('#pdfLock').checked ? $('#pdfPw').value : '';
+      if ($('#pdfLock').checked && password.length < 4) throw new Error('Bitte ein Passwort mit mindestens 4 Zeichen eingeben.');
       const blob = await buildPdf({
         format: settings.format, orient: settings.orient, margin: settings.margin,
-        quality: settings.quality, maxBytes: settings.maxSize * 1024 * 1024, ocr: settings.ocr,
+        quality: settings.quality, maxBytes: settings.maxSize * 1024 * 1024, ocr: settings.ocr, password,
       }, (i, n, ocr) => {
         const part = ocr && ocr.recognizing ? ocr.progress : 0;
         bar.style.width = `${Math.round(((i + part) / n) * 100)}%`;
@@ -1830,7 +1946,8 @@
       $('#pdfResName').textContent = fileName();
       $('#pdfResMeta').textContent = `${pages.length} ${pages.length === 1 ? 'Seite' : 'Seiten'} · ${fmtSize(blob.size)}` +
         (settings.ocr ? (blob.ocrFailed ? ' · ohne Texterkennung (nicht verfügbar)' : ' · durchsuchbar') : '') +
-        (settings.maxSize ? (blob.fitsTarget ? ` · unter ${settings.maxSize} MB` : ` · ${settings.maxSize} MB nicht erreichbar`) : '');
+        (settings.maxSize ? (blob.fitsTarget ? ` · unter ${settings.maxSize} MB` : ` · ${settings.maxSize} MB nicht erreichbar`) : '') +
+        (password ? ' · passwortgeschützt' : '');
       $('#pdfShare').hidden = !canShareFile(blob);
       $('#pdfResult').hidden = false;
       $('#pdfGenerate').hidden = true;
@@ -1858,7 +1975,19 @@
 
   $('#btnPdf').addEventListener('click', () => openPdf(false));
   $('#pdfGenerate').addEventListener('click', generatePdf);
+  $('#pdfLock').addEventListener('change', () => {
+    $('#pdfPwField').hidden = !$('#pdfLock').checked;
+    if ($('#pdfLock').checked) setTimeout(() => $('#pdfPw').focus(), 50);
+  });
+  $('#pdfPw').addEventListener('input', () => { if (pdfState.blob) resetPdfResult(); });
+  $('#pdfPwShow').addEventListener('click', () => {
+    const show = $('#pdfPw').type === 'password';
+    $('#pdfPw').type = show ? 'text' : 'password';
+    $('#pdfPwShow').setAttribute('aria-pressed', String(show));
+    $('#pdfPwShow').setAttribute('aria-label', show ? 'Passwort verbergen' : 'Passwort anzeigen');
+  });
   pdfDialog.addEventListener('change', (e) => {
+    if (e.target.id === 'pdfLock' && pdfState.blob) resetPdfResult();
     if (e.target.type === 'radio') updatePdfOptionUi();
     if ((e.target.type === 'radio' || e.target.id === 'pdfOcr') && pdfState.blob) resetPdfResult();
   });
@@ -1941,7 +2070,7 @@
     if (!target || !e.dataTransfer || !e.dataTransfer.files.length) return;
     e.preventDefault();
     const n = await importInto(e.dataTransfer.files, target === 'library');
-    if (n) toast(n === 1 ? '1 Bild importiert.' : `${n} Bilder importiert.`);
+    if (n) toast(n === 1 ? '1 Seite importiert.' : `${n} Seiten importiert.`);
   });
 
   // ---------- Start ----------

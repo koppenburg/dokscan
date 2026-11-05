@@ -76,7 +76,87 @@ const PDFWriter = (() => {
    * @param {{title?:string, producer?:string}} meta
    * @returns {Blob}
    */
-  function build(pages, meta = {}) {
+  // ---------- Verschlüsselung: Standard-Security-Handler R6 (AES-256, ISO 32000-2) ----------
+  const subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
+  const concat = (...arrs) => {
+    const out = new Uint8Array(arrs.reduce((n, a) => n + a.length, 0));
+    let o = 0;
+    for (const a of arrs) { out.set(a, o); o += a.length; }
+    return out;
+  };
+  const rand = (n) => crypto.getRandomValues(new Uint8Array(n));
+  const toHex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('').toUpperCase();
+  const sha = async (alg, data) => new Uint8Array(await subtle.digest(alg, data));
+  async function aesCbc(keyBytes, iv, data, pad) {
+    const k = await subtle.importKey('raw', keyBytes, 'AES-CBC', false, ['encrypt']);
+    const out = new Uint8Array(await subtle.encrypt({ name: 'AES-CBC', iv }, k, data));
+    // WebCrypto hängt immer einen Padding-Block an; ohne Padding (Daten = Vielfaches von 16) abschneiden
+    return pad ? out : out.subarray(0, data.length);
+  }
+  /** Hash-Algorithmus 2.B (Revision 6). */
+  async function hash2B(pw, salt, udata) {
+    let k = await sha('SHA-256', concat(pw, salt, udata));
+    let e = new Uint8Array([0]);
+    let i = 0;
+    while (i < 64 || e[e.length - 1] > i - 32) {
+      const one = concat(pw, k, udata);
+      const k1 = new Uint8Array(one.length * 64);
+      for (let j = 0; j < 64; j++) k1.set(one, j * one.length);
+      e = await aesCbc(k.subarray(0, 16), k.subarray(16, 32), k1, false);
+      let rem = 0;
+      for (let j = 0; j < 16; j++) rem += e[j];
+      k = await sha(['SHA-256', 'SHA-384', 'SHA-512'][rem % 3], e);
+      i++;
+    }
+    return k.subarray(0, 32);
+  }
+  /** Erzeugt Schlüssel und Verschlüsselungs-Wörterbuch für ein Öffnen-Passwort. */
+  async function makeEncryption(password) {
+    if (!subtle) throw new Error('Verschlüsselung wird von diesem Browser nicht unterstützt');
+    const pw = enc.encode(String(password).normalize('NFKC')).subarray(0, 127);
+    const ownerPw = rand(32); // zufälliges Besitzer-Passwort: Öffnen nur mit dem Benutzer-Passwort
+    const fileKey = rand(32);
+    const zero = new Uint8Array(16);
+    const empty = new Uint8Array(0);
+    // Algorithmus 8: U, UE
+    const uVal = rand(8), uKey = rand(8);
+    const U = concat(await hash2B(pw, uVal, empty), uVal, uKey);
+    const UE = await aesCbc(await hash2B(pw, uKey, empty), zero, fileKey, false);
+    // Algorithmus 9: O, OE
+    const oVal = rand(8), oKey = rand(8);
+    const O = concat(await hash2B(ownerPw, oVal, U), oVal, oKey);
+    const OE = await aesCbc(await hash2B(ownerPw, oKey, U), zero, fileKey, false);
+    // Algorithmus 10: Perms (alle Rechte, Metadaten verschlüsselt)
+    const P = -4;
+    const perms = new Uint8Array(16);
+    new DataView(perms.buffer).setInt32(0, P, true);
+    perms.set([0xFF, 0xFF, 0xFF, 0xFF, 0x54, 0x61, 0x64, 0x62], 4);
+    perms.set(rand(4), 12);
+    const Perms = await aesCbc(fileKey, zero, perms, false);
+    const dict = `<< /Filter /Standard /V 5 /R 6 /Length 256 /CF << /StdCF << /AuthEvent /DocOpen /CFM /AESV3 /Length 32 >> >> ` +
+      `/StmF /StdCF /StrF /StdCF /O <${toHex(O)}> /U <${toHex(U)}> /OE <${toHex(OE)}> /UE <${toHex(UE)}> /P ${P} /Perms <${toHex(Perms)}> /EncryptMetadata true >>`;
+    // Strings und Streams: zufälliger IV + AES-256-CBC mit PKCS#7
+    const encrypt = async (bytes) => { const iv = rand(16); return concat(iv, await aesCbc(fileKey, iv, bytes, true)); };
+    return { dict, encrypt };
+  }
+
+  /** UTF-16BE mit BOM (für Textstrings). */
+  function utf16be(s) {
+    const units = [];
+    for (let i = 0; i < s.length; i++) units.push(s.charCodeAt(i));
+    const out = new Uint8Array(2 + units.length * 2);
+    out[0] = 0xFE; out[1] = 0xFF;
+    units.forEach((u, i) => { out[2 + i * 2] = u >> 8; out[3 + i * 2] = u & 0xFF; });
+    return out;
+  }
+
+  /**
+   * @param {Array<{jpeg:Uint8Array,pageWidth:number,pageHeight:number,x:number,y:number,w:number,h:number,text?:Array}>} pages  Maße in pt
+   * @param {{title?:string, producer?:string, password?:string}} meta  mit password: AES-256-verschlüsselt (Öffnen-Passwort)
+   * @returns {Promise<Blob>}
+   */
+  async function build(pages, meta = {}) {
+    const crypt = meta.password ? await makeEncryption(meta.password) : null;
     const chunks = [];
     const offsets = [];
     let offset = 0;
@@ -91,22 +171,31 @@ const PDFWriter = (() => {
       for (const part of parts) push(part);
       push('\nendobj\n');
     };
+    // Textstring (UTF-16BE); verschlüsselt, wenn ein Passwort gesetzt ist
+    const textStr = async (s) => (crypt ? `<${toHex(await crypt.encrypt(utf16be(String(s))))}>` : pdfText(s));
+    const dateStr = async (d) => (crypt ? `<${toHex(await crypt.encrypt(enc.encode(d)))}>` : `(${d})`);
+    const stream = async (dictBody, bytes) => {
+      const data = crypt ? await crypt.encrypt(bytes) : bytes;
+      return [`<< ${dictBody} /Length ${data.length} >>\nstream\n`, data, '\nendstream'];
+    };
 
     const n = pages.length;
-    const total = 4 + 3 * n;
+    const total = 4 + 3 * n + (crypt ? 1 : 0);
     const first = 5; // erstes Seitenobjekt
-    push('%PDF-1.4\n');
+    push(crypt ? '%PDF-1.7\n' : '%PDF-1.4\n');
     push(new Uint8Array([0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A]));
 
-    obj(1, ['<< /Type /Catalog /Pages 2 0 R >>']);
+    obj(1, [crypt ? '<< /Type /Catalog /Pages 2 0 R /Extensions << /ADBE << /BaseVersion /1.7 /ExtensionLevel 8 >> >> >>' : '<< /Type /Catalog /Pages 2 0 R >>']);
     const kids = pages.map((_, i) => `${first + 3 * i} 0 R`).join(' ');
     obj(2, [`<< /Type /Pages /Kids [${kids}] /Count ${n} >>`]);
     const now = pdfDate(new Date());
-    obj(3, [`<< /Producer ${pdfText(meta.producer || 'DokScan')} /Creator ${pdfText(meta.producer || 'DokScan')} /Title ${pdfText(meta.title || 'Scan')} /CreationDate (${now}) /ModDate (${now}) >>`]);
+    const producer = await textStr(meta.producer || 'DokScan');
+    obj(3, [`<< /Producer ${producer} /Creator ${await textStr(meta.producer || 'DokScan')} /Title ${await textStr(meta.title || 'Scan')} /CreationDate ${await dateStr(now)} /ModDate ${await dateStr(now)} >>`]);
 
     obj(4, ['<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>']);
 
-    pages.forEach((p, i) => {
+    for (let i = 0; i < n; i++) {
+      const p = pages[i];
       const pageNo = first + 3 * i, contNo = first + 1 + 3 * i, imgNo = first + 2 + 3 * i;
       const info = jpegInfo(p.jpeg);
       obj(pageNo, [
@@ -123,21 +212,23 @@ const PDFWriter = (() => {
         parts.push('ET');
         content += parts.join('\n');
       }
-      obj(contNo, [`<< /Length ${content.length} >>\nstream\n`, content, '\nendstream']);
+      obj(contNo, await stream('', enc.encode(content)));
       const cs = info.components === 1 ? '/DeviceGray' : info.components === 4 ? '/DeviceCMYK' : '/DeviceRGB';
-      obj(imgNo, [
-        `<< /Type /XObject /Subtype /Image /Width ${info.width} /Height ${info.height} /ColorSpace ${cs} ` +
-        `/BitsPerComponent 8 /Filter /DCTDecode /Length ${p.jpeg.length} >>\nstream\n`,
-        p.jpeg,
-        '\nendstream',
-      ]);
-    });
+      obj(imgNo, await stream(`/Type /XObject /Subtype /Image /Width ${info.width} /Height ${info.height} /ColorSpace ${cs} /BitsPerComponent 8 /Filter /DCTDecode`, p.jpeg));
+    }
+    let trailerExtra = '';
+    if (crypt) {
+      const encNo = total;
+      obj(encNo, [crypt.dict]);
+      const id = toHex(rand(16));
+      trailerExtra = ` /Encrypt ${encNo} 0 R /ID [<${id}> <${id}>]`;
+    }
 
     const xrefAt = offset;
     let xref = `xref\n0 ${total + 1}\n0000000000 65535 f \n`;
     for (let k = 1; k <= total; k++) xref += String(offsets[k]).padStart(10, '0') + ' 00000 n \n';
     push(xref);
-    push(`trailer\n<< /Size ${total + 1} /Root 1 0 R /Info 3 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`);
+    push(`trailer\n<< /Size ${total + 1} /Root 1 0 R /Info 3 0 R${trailerExtra} >>\nstartxref\n${xrefAt}\n%%EOF\n`);
     return new Blob(chunks, { type: 'application/pdf' });
   }
 
