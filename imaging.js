@@ -45,6 +45,9 @@ const Img = (() => {
 
   function smoothDraw(dst, src, w, h) {
     const x = ctx(dst);
+    // weißer Untergrund: transparente Bereiche (PNG/WebP) würden im JPEG sonst schwarz
+    x.fillStyle = '#fff';
+    x.fillRect(0, 0, dst.width, dst.height);
     x.imageSmoothingEnabled = true;
     x.imageSmoothingQuality = 'high';
     x.drawImage(src, 0, 0, w, h);
@@ -167,13 +170,55 @@ const Img = (() => {
     return h;
   }
 
+  /**
+   * Echtes Seitenverhältnis (Breite/Höhe) des fotografierten Rechtecks aus der Perspektive
+   * (Zhang & He, „Whiteboard scanning“; Bildmitte als Hauptpunkt). null, wenn nicht bestimmbar.
+   * P: Ecken in Pixeln (oben links, oben rechts, unten rechts, unten links).
+   */
+  function trueAspect(P, W, H) {
+    const cx = W / 2, cy = H / 2;
+    const m = (p) => [p[0] - cx, p[1] - cy, 1];
+    const m1 = m(P[0]), m2 = m(P[1]), m3 = m(P[3]), m4 = m(P[2]);
+    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const c14 = cross(m1, m4);
+    const k2 = dot(c14, m3) / dot(cross(m2, m4), m3);
+    const k3 = dot(c14, m2) / dot(cross(m3, m4), m2);
+    if (!isFinite(k2) || !isFinite(k3)) return null;
+    const n2 = [k2 * m2[0] - m1[0], k2 * m2[1] - m1[1], k2 * m2[2] - m1[2]];
+    const n3 = [k3 * m3[0] - m1[0], k3 * m3[1] - m1[1], k3 * m3[2] - m1[2]];
+    const den = n2[2] * n3[2];
+    const diag = Math.hypot(W, H);
+    let f2 = Math.abs(den) > 1e-12 ? -(n2[0] * n3[0] + n2[1] * n3[1]) / den : NaN;
+    // Brennweite nicht bestimmbar (nur in eine Richtung gekippt) oder unplausibel:
+    // übliche Handy-Hauptkamera annehmen (ca. 67° horizontales Sichtfeld)
+    if (!(f2 > (0.25 * diag) ** 2 && f2 < (6 * diag) ** 2)) f2 = (0.76 * Math.max(W, H)) ** 2;
+    const r2 = ((n2[0] ** 2 + n2[1] ** 2) / f2 + n2[2] ** 2) / ((n3[0] ** 2 + n3[1] ** 2) / f2 + n3[2] ** 2);
+    return r2 > 0 ? Math.sqrt(r2) : null;
+  }
+  // übliche Papierformate (Breite/Höhe): A-Reihe und US Letter, hoch und quer
+  const PAPER = [1 / Math.SQRT2, Math.SQRT2, 8.5 / 11, 11 / 8.5];
+
+  /** Ausgabegröße der entzerrten Seite: Fläche wie im Foto, Seitenverhältnis aus der Perspektive. */
+  function warpSize(P, W, H) {
+    const d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+    const ow = Math.max(d(P[0], P[1]), d(P[3], P[2]));
+    const oh = Math.max(d(P[0], P[3]), d(P[1], P[2]));
+    const naive = ow / oh;
+    let r = null;
+    try { r = trueAspect(P, W, H); } catch (e) { r = null; }
+    if (!r || r / naive > 1.7 || naive / r > 1.7) r = naive;
+    // nah an einem Papierformat → genau dieses (Messfehler der Ecken ausgleichen)
+    for (const c of PAPER) if (Math.abs(r / c - 1) < 0.04) { r = c; break; }
+    const area = ow * oh;
+    return [Math.sqrt(area * r), Math.sqrt(area / r)];
+  }
+
   /** Entzerrt das Viereck (normalisierte Ecken) zu einem Rechteck. */
   function warp(src, corners, maxDim) {
     const W = src.width, H = src.height;
     const P = corners.map(([x, y]) => [x * W, y * H]);
-    const d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
-    let ow = Math.max(d(P[0], P[1]), d(P[3], P[2]));
-    let oh = Math.max(d(P[0], P[3]), d(P[1], P[2]));
+    let [ow, oh] = warpSize(P, W, H);
     const s = Math.min(1, maxDim / Math.max(ow, oh));
     ow = Math.max(1, Math.round(ow * s));
     oh = Math.max(1, Math.round(oh * s));
@@ -251,21 +296,38 @@ const Img = (() => {
   const blur = (a, w, h, r) => boxPass(boxPass(a, w, h, r, true), w, h, r, false);
   const dilate = (a, w, h, r) => pass(pass(a, w, h, r, true, 'max'), w, h, r, false, 'max');
 
-  /** Schätzt die Papierfarbe (Hintergrund) pro Pixel, um Schatten und ungleichmäßiges Licht auszugleichen. */
+  /**
+   * Schätzt die Papierfarbe (Hintergrund) pro Pixel, um Schatten und ungleichmäßiges Licht auszugleichen.
+   * Größere Flächen, die deutlich dunkler als das Papier sind (Passfoto, Logo, farbiger Tabellenkopf),
+   * zählen nicht als Papier: Dort wird die Papierfarbe aus der Umgebung übernommen – sonst würden
+   * solche Flächen vom Filter weiß gemacht.
+   */
   function background(c) {
     const W = c.width, H = c.height;
     const sdim = Math.min(256, Math.max(48, Math.round(Math.max(W, H) / 12)));
     const small = draw(c, sdim);
-    const w = small.width, h = small.height;
+    const w = small.width, h = small.height, n = w * h;
     const sx = ctx(small);
     const id = sx.getImageData(0, 0, w, h);
     const d = id.data;
-    const a = new Float32Array(w * h);
+    const a = new Float32Array(n);
+    const D = [];
     for (let ch = 0; ch < 3; ch++) {
-      for (let i = 0; i < w * h; i++) a[i] = d[i * 4 + ch];
-      let r = dilate(dilate(a, w, h, 2), w, h, 2);
-      r = blur(blur(r, w, h, 3), w, h, 3);
-      for (let i = 0; i < w * h; i++) d[i * 4 + ch] = r[i];
+      for (let i = 0; i < n; i++) a[i] = d[i * 4 + ch];
+      D.push(dilate(dilate(a, w, h, 2), w, h, 2));
+    }
+    // Papierhelligkeit: helle Mehrheit der Fläche
+    const L = new Float32Array(n);
+    for (let i = 0; i < n; i++) L[i] = 0.299 * D[0][i] + 0.587 * D[1][i] + 0.114 * D[2][i];
+    const P = Float32Array.from(L).sort()[Math.floor(n * 0.9)];
+    const mask = new Uint8Array(n);
+    let dark = 0;
+    for (let i = 0; i < n; i++) if (L[i] < P * NON_PAPER) { mask[i] = 1; dark++; }
+    // nur wenn das Blatt überwiegend Papier ist (sonst z. B. farbiges/dunkles Papier → wie bisher)
+    if (dark && dark < n * 0.6) fillFromNeighbors(D, mask, w, h);
+    for (let ch = 0; ch < 3; ch++) {
+      const r = blur(blur(D[ch], w, h, 3), w, h, 3);
+      for (let i = 0; i < n; i++) d[i * 4 + ch] = r[i];
     }
     sx.putImageData(id, 0, 0);
     const big = canvas(W, H);
@@ -274,6 +336,39 @@ const Img = (() => {
     release(big);
     release(small);
     return bd;
+  }
+  const NON_PAPER = 0.58; // Anteil der Papierhelligkeit, unter dem eine Fläche nicht als Papier gilt
+
+  /** Füllt markierte Zellen von außen nach innen mit dem Mittel der bereits gefüllten Nachbarn. */
+  function fillFromNeighbors(chs, mask, w, h) {
+    const n = w * h;
+    const done = new Uint8Array(n);
+    const queued = new Uint8Array(n);
+    const q = new Int32Array(n);
+    let qh = 0, qt = 0;
+    for (let i = 0; i < n; i++) done[i] = mask[i] ? 0 : 1;
+    const push = (j) => { if (mask[j] && !queued[j]) { queued[j] = 1; q[qt++] = j; } };
+    for (let i = 0; i < n; i++) {
+      if (!mask[i]) continue;
+      const x = i % w, y = (i / w) | 0;
+      if ((x > 0 && done[i - 1]) || (x < w - 1 && done[i + 1]) || (y > 0 && done[i - w]) || (y < h - 1 && done[i + w])) push(i);
+    }
+    while (qh < qt) {
+      const i = q[qh++];
+      const x = i % w, y = (i / w) | 0;
+      const nb = [];
+      if (x > 0) nb.push(i - 1);
+      if (x < w - 1) nb.push(i + 1);
+      if (y > 0) nb.push(i - w);
+      if (y < h - 1) nb.push(i + w);
+      for (const ch of chs) {
+        let s = 0, k = 0;
+        for (const j of nb) if (done[j]) { s += ch[j]; k++; }
+        if (k) ch[i] = s / k;
+      }
+      done[i] = 1;
+      for (const j of nb) push(j);
+    }
   }
 
   function curve(lo, hi, gamma) {
@@ -1172,7 +1267,7 @@ const Img = (() => {
   const lastFrame = () => fastCanvas;
 
   // interne Bausteine für Tests
-  const _internals = { blurScore, CFG, prepareEdges, houghLines, lineQuads, scoreQuad, sideMetrics, regionStats, statDist, expandSides, intersect };
+  const _internals = { trueAspect, warpSize, blurScore, CFG, prepareEdges, houghLines, lineQuads, scoreQuad, sideMetrics, regionStats, statDist, expandSides, intersect };
 
   return { _internals, blurScore, FULL, canvas, release, load, draw, toBlob, lastFrame, rotate, rotateCornersCW, isFull, isConvex, warp, filter, hasAdjust, adjustData, adjust, finish, detect, prepare, processPage };
 })();

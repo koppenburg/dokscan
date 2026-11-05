@@ -15,7 +15,7 @@ const Ocr = (() => {
       const s = document.createElement('script');
       s.src = src;
       s.onload = () => resolve();
-      s.onerror = () => reject(new Error('Texterkennung konnte nicht geladen werden'));
+      s.onerror = () => reject(new Error('Texterkennung konnte nicht geladen werden' + (navigator.onLine ? '' : ' – beim ersten Mal ist eine Internetverbindung nötig')));
       document.head.appendChild(s);
     });
   }
