@@ -1,11 +1,11 @@
 'use strict';
 // Offline-Cache für die App-Dateien (stale-while-revalidate).
-const CACHE = 'dokscan-v16';
+const CACHE = 'dokscan-v17';
 // Fremdbibliotheken (Texterkennung, PDF-Import) in einem eigenen Cache, der Updates der App übersteht.
 // Nur hochzählen, wenn sich Dateien in vendor/ ändern.
 const VENDOR = 'dokscan-vendor-1';
 const ASSETS = [
-  './', 'index.html', 'styles.css', 'app.js', 'imaging.js', 'pdf.js', 'proc-worker.js', 'ocr.js', 'pdfimport.js', 'naming.js',
+  './', 'index.html', 'styles.css', 'app.js', 'imaging.js', 'pdf.js', 'proc-worker.js', 'ocr.js', 'pdfimport.js', 'naming.js', 'backup.js',
   'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png',
 ];
 const FONTS = [
