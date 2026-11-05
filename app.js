@@ -598,7 +598,15 @@
       const r = await w.call({ type: 'live', bitmap, size, prev: prev || null }, 5000, [bitmap]);
       return r.ok ? r.result : null;
     }
-    return { detect, init: w.init };
+    /** Kamerabild als JPEG speichern – in diesem Thread, damit ein Foto nicht auf die Seitenverarbeitung wartet. */
+    async function encodeFrame(videoEl, maxDim) {
+      if (!window.createImageBitmap || !(await w.init())) return null;
+      let bitmap;
+      try { bitmap = await createImageBitmap(videoEl); } catch { return null; }
+      const r = await w.call({ type: 'encode', bitmap, maxDim }, 30000, [bitmap]);
+      return r.ok ? r.result : null;
+    }
+    return { detect, init: w.init, encodeFrame };
   })();
 
   const Proc = (() => {
@@ -767,7 +775,9 @@
         try { ok += await addPdf(f, doc); }
         catch (e) {
           console.error(e);
-          toast(e.cancelled ? 'PDF-Import abgebrochen.' : `„${f.name}“ konnte nicht gelesen werden.`);
+          toast(e.cancelled ? 'PDF-Import abgebrochen.'
+            : /geladen/.test(e.message || '') ? e.message + (navigator.onLine ? '.' : ' – beim ersten Mal ist eine Internetverbindung nötig.')
+              : `„${f.name}“ konnte nicht gelesen werden.`, null, 5000);
         }
         continue;
       }
@@ -1055,7 +1065,7 @@
 
   // ---------- Kamera ----------
   const video = $('#video');
-  const cam = { stream: null, track: null, added: 0, torch: false, done: false, shooting: false };
+  const cam = { stream: null, track: null, added: 0, torch: false, done: false, shooting: false, startGen: 0 };
 
   function setCamMsg(text, showFallback) {
     $('#camMsg').hidden = !text;
@@ -1157,7 +1167,8 @@
   // Live-Randerkennung im Kamerabild
   // Erkennung läuft (wenn möglich) in einem eigenen Thread so oft wie möglich (max. ~20/s);
   // der Rahmen wird bei jedem Bildschirmbild weich zur zuletzt erkannten Position nachgeführt.
-  const LIVE_MIN_INTERVAL = 50;   // ms zwischen zwei Erkennungen (≈ 20/s)
+  const LIVE_MIN_INTERVAL = 70;   // ms zwischen zwei Erkennungen (≈ 14/s; spart Akku)
+  const LIVE_IDLE_INTERVAL = 160; // nach einer Aufnahme (Warten auf die nächste Seite) seltener
   const LIVE_HOLD_MS = 450;       // so lange bleibt der Rahmen nach Aussetzern stehen
   const live = { on: false, gen: 0, quad: null, shown: null, sig: null, lastSeen: 0, jump: null, raf: 0, found: false, useWorker: null };
 
@@ -1165,6 +1176,10 @@
     stopLive();
     if (!settings.autoCrop) return;
     live.on = true;
+    // pro Kamera-Sitzung neu versuchen, den Hintergrund-Thread zu nutzen
+    if (live.useWorker === false) live.useWorker = null;
+    live.fails = 0;
+    live.dim = '';
     const gen = ++live.gen;
     liveLoop(gen);
     live.raf = requestAnimationFrame(renderLive);
@@ -1186,12 +1201,20 @@
   async function liveLoop(gen) {
     if (live.useWorker === null) live.useWorker = await LiveW.init();
     while (live.on && live.gen === gen) {
-      if (!video.videoWidth || cam.shooting || document.hidden) { await sleep(120); continue; }
+      if (!video.videoWidth || cam.shooting || document.hidden || (cam.track && cam.track.muted)) { await sleep(120); continue; }
+      if (video.readyState < 2) { await sleep(60); continue; } // noch kein Bild
+      // Gerät gedreht → Seitenverhältnis des Videos ändert sich: alter Rahmen passt nicht mehr
+      const dim = video.videoWidth + 'x' + video.videoHeight;
+      if (dim !== live.dim) {
+        if (live.dim) { live.quad = null; live.shown = null; live.jump = null; resetAuto(); }
+        live.dim = dim;
+      }
       const t0 = performance.now();
       let res = null;
       if (live.useWorker) {
         res = await LiveW.detect(video, 192, live.quad);
-        if (!res) live.useWorker = false; // Rückfall auf den Hauptthread
+        if (res) live.fails = 0;
+        else if (++live.fails >= 5) { live.useWorker = false; live.sig = null; } // erst nach mehreren Fehlern auf den Hauptthread
       }
       if (!res) {
         let q = null;
@@ -1202,7 +1225,8 @@
       onDetection(res.quad, res.sig);
       const cost = performance.now() - t0;
       // im Hauptthread mehr Pause lassen, damit die Bedienung flüssig bleibt
-      await sleep(live.useWorker ? Math.max(0, LIVE_MIN_INTERVAL - cost) : Math.max(120, cost * 1.5));
+      const every = auto.waiting ? LIVE_IDLE_INTERVAL : LIVE_MIN_INTERVAL;
+      await sleep(live.useWorker ? Math.max(0, every - cost) : Math.max(every, 120, cost * 1.5));
     }
   }
 
@@ -1254,7 +1278,7 @@
     const q = live.shown;
     const found = !!q && !!video.videoWidth;
     $('#camera').classList.toggle('doc-found', !!live.quad);
-    if (!found) { if (poly.hasAttribute('points')) poly.removeAttribute('points'); return; }
+    if (!found) { if (poly.hasAttribute('points')) { poly.removeAttribute('points'); poly.dataset.pts = ''; } return; }
     const vw = video.videoWidth, vh = video.videoHeight;
     if (!liveBox || liveBox.vw !== vw || liveBox.vh !== vh) {
       const r = svg.getBoundingClientRect();
@@ -1263,20 +1287,24 @@
       svg.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
     }
     const { s, ox, oy } = liveBox;
-    poly.setAttribute('points', q.map(([x, y]) => `${(ox + x * vw * s).toFixed(1)},${(oy + y * vh * s).toFixed(1)}`).join(' '));
+    const pts = q.map(([x, y]) => `${(ox + x * vw * s).toFixed(1)},${(oy + y * vh * s).toFixed(1)}`).join(' ');
+    if (pts !== poly.dataset.pts) { poly.dataset.pts = pts; poly.setAttribute('points', pts); } // nur bei Änderung
   }
 
   async function startStream() {
     stopStream();
+    // Zähler: überholte Starts (schnelles Umschalten, kurz in den Hintergrund) beenden ihren Strom selbst
+    const gen = ++cam.startGen;
     setCamMsg('Kamera wird gestartet …', false);
     // „Weites Sichtfeld“: 4:3-Format in mittlerer Auflösung – iPads schneiden bei sehr hohen Auflösungen das Bild zu.
     const res = settings.wideFov
       ? { width: { ideal: 1920 }, height: { ideal: 1440 }, aspectRatio: { ideal: 4 / 3 } }
       : { width: { ideal: 4096 }, height: { ideal: 3072 } };
     const byFacing = { facingMode: { ideal: 'environment' }, ...res };
+    let stream = null;
     try {
       try {
-        cam.stream = await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
           audio: false,
           video: settings.camDevice ? { deviceId: { exact: settings.camDevice }, ...res } : byFacing,
         });
@@ -1284,9 +1312,11 @@
         if (!settings.camDevice || e.name === 'NotAllowedError' || e.name === 'SecurityError') throw e;
         settings.camDevice = ''; // gespeicherte Kamera gibt es nicht mehr
         saveSettings();
-        cam.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: byFacing });
+        if (gen !== cam.startGen) return;
+        stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: byFacing });
       }
     } catch (e) {
+      if (gen !== cam.startGen) return;
       console.warn(e);
       const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
       if (denied) cam.denied = true; // für diese Sitzung merken: nächstes Mal gleich die Kamera-App
@@ -1297,10 +1327,16 @@
         : 'Die Kamera konnte nicht gestartet werden. Du kannst stattdessen die Kamera-App verwenden.', true);
       return;
     }
-    if (topScreen() !== 'camera') { stopStream(); return; }
-    cam.track = cam.stream.getVideoTracks()[0];
-    video.srcObject = cam.stream;
+    if (gen !== cam.startGen || topScreen() !== 'camera' || document.hidden) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    cam.stream = stream;
+    cam.track = stream.getVideoTracks()[0];
+    watchTrack(cam.track, gen);
+    video.srcObject = stream;
     try { await video.play(); } catch { /* autoplay */ }
+    if (gen !== cam.startGen) return;
     setCamMsg('', false);
     startLive();
     const caps = cam.track && cam.track.getCapabilities ? cam.track.getCapabilities() : {};
@@ -1422,7 +1458,20 @@
     startStream();
   });
 
+  /** Unterbrechungen der Kamera (Split View, Anruf, andere App) anzeigen und danach neu starten. */
+  function watchTrack(track, gen) {
+    const current = () => gen === cam.startGen && cam.track === track && topScreen() === 'camera';
+    track.onmute = () => { if (current()) { setCamMsg('Kamera pausiert – z. B. durch Split View, einen Anruf oder eine andere App.', false); resetAuto(); } };
+    track.onunmute = () => { if (current()) setCamMsg('', false); };
+    track.onended = () => {
+      if (!current()) return;
+      setCamMsg('Die Kamera wurde unterbrochen. Sie wird neu gestartet …', false);
+      setTimeout(() => { if (current() && !document.hidden) startStream(); }, 800);
+    };
+  }
+
   function stopStream() {
+    cam.startGen++;
     stopLive();
     if (cam.stream) cam.stream.getTracks().forEach((t) => t.stop());
     cam.stream = null;
@@ -1516,7 +1565,7 @@
       updateCamUi();
       await track((async () => {
         // bevorzugt im Hintergrund-Thread (blockiert die Bedienung nicht)
-        const enc = await Proc.encodeFrame(video, MAX_DIM);
+        const enc = (await LiveW.encodeFrame(video, MAX_DIM)) || (await Proc.encodeFrame(video, MAX_DIM));
         if (enc) {
           showThumb(enc.thumb);
           deliver(enc.original);
@@ -1849,7 +1898,7 @@
 
   function rotatePage(steps) { rotatePageBy(editor.page, steps); }
   function rotatePageBy(p, steps) {
-    p.autoDetect = false;
+    // automatische Randerkennung bleibt: sie läuft nach dem Drehen auf dem gedrehten Bild
     for (let k = 0; k < ((steps % 4) + 4) % 4; k++) p.corners = Img.rotateCornersCW(p.corners);
     p.rotation = (((p.rotation + steps * 90) % 360) + 360) % 360;
     schedule(p);
@@ -2455,6 +2504,13 @@
         tryReload();
       });
       navigator.serviceWorker.register('sw.js').catch(() => {});
+      // Texterkennung und PDF-Import im Hintergrund für die Offline-Nutzung vorladen (einmalig ~7 MB)
+      const warm = () => {
+        if (!settings.ocr || !navigator.onLine) return;
+        navigator.serviceWorker.ready.then((reg) => { if (reg.active) reg.active.postMessage({ type: 'warm-vendor' }); }).catch(() => {});
+      };
+      setTimeout(warm, 8000);
+      window.addEventListener('online', () => setTimeout(warm, 3000));
     }
   }
   init();
