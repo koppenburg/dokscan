@@ -302,6 +302,27 @@ main { flex: 1; overflow-y: auto; padding: 6px 16px 20px; -webkit-overflow-scrol
 .sheet-dialog { overflow-y: auto; }
 .seg span { white-space: nowrap; }
 
+/* ---------- Auswahlmodus (mehrere Seiten) ---------- */
+.sel-only { display: none !important; }
+.docview.selecting .no-sel { display: none !important; }
+.docview.selecting .sel-head { display: flex !important; }
+.docview.selecting .sel-tools { display: grid !important; }
+.sel-head { flex: 1; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.sel-count { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-check { position: absolute; right: 8px; bottom: 8px; width: 30px; height: 30px; border-radius: 50%; border: 2px solid #fff; background: rgba(20, 23, 28, .35); display: none; place-items: center; color: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .3); pointer-events: none; }
+.card-check .ic { width: 16px; height: 16px; stroke-width: 3; opacity: 0; }
+.docview.selecting .card-check { display: grid; }
+.docview.selecting .drag, .docview.selecting #gridHint { display: none !important; }
+.card.selected { outline: 3px solid var(--accent); outline-offset: -1px; }
+.card.selected .card-check { background: var(--accent); border-color: var(--accent); }
+.card.selected .card-check .ic { opacity: 1; }
+.tool.danger-tool, .tool.danger-tool .ic { color: var(--danger); }
+#selFilter { justify-content: safe center; }
+
+.pw-input { padding-right: 4px; }
+.pw-toggle { border: 0; background: transparent; color: var(--muted); width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; }
+.pw-toggle[aria-pressed="true"] { color: var(--accent); }
+
 /* ---------- Unschärfe ---------- */
 .card-blur { position: absolute; left: 6px; top: 6px; display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px 3px 6px; border-radius: 999px; background: #b45309; color: #fff; font-size: .74rem; font-weight: 700; pointer-events: none; }
 .card-blur .ic { width: 14px; height: 14px; }
