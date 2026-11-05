@@ -47,6 +47,8 @@
     <symbol id="i-warn" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
     <symbol id="i-select" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 12 3 3 5-6"/></symbol>
     <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   </defs>
 </svg>
@@ -171,6 +173,7 @@
   <div id="edStage" class="ed-stage">
     <div id="edPreviewWrap" class="ed-preview">
       <img id="edPreview" alt="Vorschau der Seite">
+      <canvas id="adjCanvas" class="adj-canvas" hidden></canvas>
       <span class="spinner big" id="edSpinner" hidden></span>
     </div>
     <div id="cropWrap" class="crop-wrap" hidden>
@@ -189,7 +192,10 @@
     <button id="edBlurRetake" class="btn small-btn" type="button">Neu aufnehmen</button>
   </div>
   <div id="edTools" class="ed-tools">
-    <div class="chips" id="filterChips" role="radiogroup" aria-label="Filter"></div>
+    <div class="filter-row">
+      <div class="chips" id="filterChips" role="radiogroup" aria-label="Filter"></div>
+      <button id="edAdjust" class="chip adj-chip" type="button" title="Helligkeit und Kontrast"><svg class="ic"><use href="#i-sun"/></svg><span>Anpassen</span></button>
+    </div>
     <div class="tool-row">
       <button id="edMovePrev" class="tool" type="button"><svg class="ic"><use href="#i-left"/></svg><span>Nach vorn</span></button>
       <button id="edRotL" class="tool" type="button"><svg class="ic"><use href="#i-rot-l"/></svg><span>Links</span></button>
@@ -197,6 +203,16 @@
       <button id="edRotR" class="tool" type="button"><svg class="ic"><use href="#i-rot-r"/></svg><span>Rechts</span></button>
       <button id="edText" class="tool" type="button"><svg class="ic"><use href="#i-text"/></svg><span>Text</span></button>
       <button id="edMoveNext" class="tool" type="button"><svg class="ic"><use href="#i-right"/></svg><span>Nach hinten</span></button>
+    </div>
+  </div>
+  <div id="adjTools" class="ed-tools" hidden>
+    <label class="adj-row"><span>Helligkeit</span><input id="adjBright" type="range" min="-100" max="100" step="1" value="0"><output id="adjBrightVal">0</output></label>
+    <label class="adj-row"><span>Kontrast</span><input id="adjContrast" type="range" min="-100" max="100" step="1" value="0"><output id="adjContrastVal">0</output></label>
+    <div class="tool-row">
+      <button id="adjCancel" class="tool" type="button"><svg class="ic"><use href="#i-x"/></svg><span>Abbrechen</span></button>
+      <button id="adjReset" class="tool" type="button"><svg class="ic"><use href="#i-undo"/></svg><span>Zurücksetzen</span></button>
+      <button id="adjAll" class="tool" type="button"><svg class="ic"><use href="#i-copy"/></svg><span>Alle Seiten</span></button>
+      <button id="adjApply" class="tool accent" type="button"><svg class="ic"><use href="#i-check"/></svg><span>Übernehmen</span></button>
     </div>
   </div>
   <div id="cropTools" class="ed-tools" hidden>
@@ -330,10 +346,11 @@
     </header>
     <label class="field">
       <span>Name</span>
-      <span class="input-suffix"><input id="nameInput" type="text" maxlength="120" autocomplete="off" enterkeyhint="done"></span>
+      <span class="input-suffix"><input id="nameInput" type="text" maxlength="120" autocomplete="off" enterkeyhint="done" placeholder="Leer lassen = automatisch"></span>
     </label>
+    <p id="nameAutoHint" class="muted small" hidden>Der Name wurde automatisch aus dem erkannten Text erzeugt und passt sich an, solange du ihn nicht änderst.</p>
     <div id="nameSuggestWrap" class="field" hidden>
-      <span>Vorschläge aus dem erkannten Text</span>
+      <span>Vorschläge</span>
       <div id="nameSuggest" class="chips wrap"></div>
     </div>
     <button id="nameSave" class="btn primary wide" type="button"><svg class="ic"><use href="#i-check"/></svg>Speichern</button>
@@ -370,6 +387,7 @@
     <label class="switch"><input id="setBlurWarn" type="checkbox"><span class="track"></span><span>Unschärfe-Warnung<br><span class="muted small">Hinweis, wenn ein Foto unscharf wirkt – mit „Neu aufnehmen“</span></span></label>
     <label class="switch"><input id="setWideFov" type="checkbox"><span class="track"></span><span>Weites Sichtfeld<br><span class="muted small">Kamerabild ohne Zuschnitt (empfohlen für iPad), etwas geringere Auflösung</span></span></label>
     <label class="switch"><input id="setOcr" type="checkbox"><span class="track"></span><span>Texterkennung (OCR)<br><span class="muted small">Text wird im Hintergrund erkannt, PDF wird durchsuchbar. Beim ersten Mal werden ca. 9 MB geladen.</span></span></label>
+    <label class="switch"><input id="setAutoName" type="checkbox"><span class="track"></span><span>Dokumente automatisch benennen<br><span class="muted small">Name aus Datum, Absender und Art des Schreibens, z. B. „2026-11-05 Finanzamt Musterstadt Bescheid“ (braucht die Texterkennung)</span></span></label>
     <label class="switch"><input id="setAutoPdf" type="checkbox"><span class="track"></span><span>Nach dem Scannen automatisch PDF erstellen</span></label>
     <p class="muted small">Alle Dokumente werden nur lokal in diesem Browser gespeichert.</p>
   </form>
@@ -381,6 +399,7 @@
 <script src="imaging.js"></script>
 <script src="ocr.js"></script>
 <script src="pdfimport.js"></script>
+<script src="naming.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

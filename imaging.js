@@ -325,6 +325,41 @@ const Img = (() => {
     return c;
   }
 
+  // ---------- Helligkeit und Kontrast ----------
+  const hasAdjust = (a) => !!a && (Math.round(a.b || 0) !== 0 || Math.round(a.c || 0) !== 0);
+  /**
+   * Tonwertkurve für Helligkeit/Kontrast (je −100 … 100). Helligkeit wirkt über ein Gamma
+   * (Schwarz und Weiß bleiben erhalten), Kontrast spreizt um die Mitte.
+   */
+  function adjustLut(a) {
+    const lut = new Uint8ClampedArray(256);
+    const g = Math.pow(2, -(a.b || 0) / 70);
+    const k = Math.pow(2, (a.c || 0) / 60);
+    for (let i = 0; i < 256; i++) lut[i] = Math.round(((Math.pow(i / 255, g) - 0.5) * k + 0.5) * 255);
+    return lut;
+  }
+  /** Helligkeit/Kontrast auf Bilddaten (RGBA) anwenden; src und dst dürfen gleich sein. */
+  function adjustData(src, dst, a) {
+    const lut = adjustLut(a);
+    for (let i = 0, n = src.length; i < n; i += 4) {
+      dst[i] = lut[src[i]]; dst[i + 1] = lut[src[i + 1]]; dst[i + 2] = lut[src[i + 2]]; dst[i + 3] = src[i + 3];
+    }
+    return dst;
+  }
+  function adjust(c, a) {
+    if (!hasAdjust(a)) return c;
+    const x = ctx(c);
+    const id = x.getImageData(0, 0, c.width, c.height);
+    adjustData(id.data, id.data, a);
+    x.putImageData(id, 0, 0);
+    return c;
+  }
+  /** Filter und Anpassung in passender Reihenfolge: bei S/W vor der Schwelle, sonst danach. */
+  function finish(c, mode, a) {
+    if (mode === 'bw') { adjust(c, a); filter(c, mode); } else { filter(c, mode); adjust(c, a); }
+    return c;
+  }
+
   // ---------- Automatische Dokumenterkennung ----------
 
   function convexHull(points) {
@@ -1100,7 +1135,8 @@ const Img = (() => {
    * Komplette Seitenverarbeitung (Hauptthread oder Worker):
    * Original laden → drehen → ggf. Ränder erkennen → entzerren → Filter → JPEG + Vorschaubild.
    */
-  async function processPage({ original, rotation, corners, filter: mode, autoDetect, maxDim = 3000 }) {
+  /** Original laden, drehen, ggf. Ränder erkennen und entzerren (ohne Filter). */
+  async function prepare({ original, rotation, corners, autoDetect, maxDim = 3000 }) {
     const img = await load(original);
     let c = draw(img, maxDim);
     release(img);
@@ -1115,10 +1151,15 @@ const Img = (() => {
       const t = trimEdges(c);
       if (t !== c) { release(c); c = t; }
     }
+    return { c, corners };
+  }
+
+  async function processPage({ original, rotation, corners: hint, filter: mode, adjust: adj, autoDetect, maxDim = 3000 }) {
+    const { c, corners } = await prepare({ original, rotation, corners: hint, autoDetect, maxDim });
     // Schärfe auf dem entzerrten Foto messen (vor dem Filter, der Kontraste verändert)
     let blur = null;
     try { blur = blurScore(c); } catch (e) { blur = null; }
-    filter(c, mode);
+    finish(c, mode, adj);
     const processed = await toBlob(c, 'image/jpeg', 0.9);
     const t = draw(c, 420);
     const thumb = await toBlob(t, 'image/jpeg', 0.8);
@@ -1133,5 +1174,5 @@ const Img = (() => {
   // interne Bausteine für Tests
   const _internals = { blurScore, CFG, prepareEdges, houghLines, lineQuads, scoreQuad, sideMetrics, regionStats, statDist, expandSides, intersect };
 
-  return { _internals, blurScore, FULL, canvas, release, load, draw, toBlob, lastFrame, rotate, rotateCornersCW, isFull, isConvex, warp, filter, detect, processPage };
+  return { _internals, blurScore, FULL, canvas, release, load, draw, toBlob, lastFrame, rotate, rotateCornersCW, isFull, isConvex, warp, filter, hasAdjust, adjustData, adjust, finish, detect, prepare, processPage };
 })();

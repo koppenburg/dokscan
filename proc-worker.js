@@ -50,6 +50,14 @@ self.onmessage = async (e) => {
       self.postMessage({ id, ok: true, result: { original, thumb } });
       return;
     }
+    if (job.type === 'prepare') {
+      // entzerrte Seite ohne Filter in Vorschaugröße (für die Helligkeit/Kontrast-Regler)
+      const { c } = await Img.prepare(job);
+      const blob = await Img.toBlob(c, 'image/jpeg', 0.92);
+      Img.release(c);
+      self.postMessage({ id, ok: true, result: { blob } });
+      return;
+    }
     const result = await Img.processPage(job);
     self.postMessage({ id, ok: true, result });
   } catch (err) {

@@ -12,7 +12,7 @@
 
   // ---------- Einstellungen ----------
   const IS_IPAD = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true, blurWarn: true, orient: 'auto', margin: 0, maxSize: 0 };
+  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true, blurWarn: true, orient: 'auto', margin: 0, maxSize: 0, autoName: true };
   const settings = (() => {
     try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('dokscan.settings') || '{}') }; }
     catch { return { ...DEFAULTS }; }
@@ -103,6 +103,7 @@
     id: p.id, docId: p.docId, order: p.order, created: p.created, original: p.original,
     rotation: p.rotation, corners: p.corners, filter: p.filter, autoDetect: !!(p.autoDetect && !p.processed),
     processed: p.processed, pw: p.pw, ph: p.ph, thumb: p.thumb, procKey: p.procKey, ocr: p.ocr, blur: p.blur, pdfText: p.pdfText || null,
+    bright: p.bright || 0, contrast: p.contrast || 0,
   });
   const persist = (p) => {
     if (p.deleted || !p.docId) return;
@@ -141,9 +142,42 @@
     d.thumb = (list[0] && list[0].thumb) || null;
     d.text = list.map((p) => (p.ocr && p.ocr.text) || '').filter(Boolean).join('\n\n');
     d.updated = Date.now();
+    applyAutoName(d, list[0]);
     if (docs.includes(d)) DB.putDoc(d);
     renderLibrary();
     if (currentDoc === d) renderDocHeader();
+  }
+
+  /**
+   * Automatischer Name aus dem erkannten Text („2026-11-05 Finanzamt Musterstadt Bescheid“),
+   * solange das Dokument nicht von Hand benannt wurde. Gibt true zurück, wenn sich der Name geändert hat.
+   */
+  function applyAutoName(d, first) {
+    if (!settings.autoName || d.named) return false;
+    // Name hängt an der ersten Seite: nur neu bestimmen, wenn sich deren Text geändert hat
+    const key = first ? (first.ocr && first.ocr.key) || '' : null;
+    if (key !== null && d.autoKey === key) return false;
+    if (key === null && d.autoKey !== undefined) return false; // beim Start: schon ausgewertet
+    if (first && !key) return false; // Text der ersten Seite noch nicht erkannt
+    let name = null;
+    try {
+      const s = DocName.suggest(d.text || '', { firstPage: first && first.ocr ? first.ocr.text : '', created: d.created });
+      name = s && s.name;
+    } catch (e) { console.warn('Benennung:', e); }
+    d.autoKey = key || '';
+    if (name) {
+      if (d.name === name && d.auto) return false;
+      d.name = name;
+      d.auto = true;
+      return true;
+    }
+    if (d.auto) { d.name = docDefaultName(d.created); d.auto = false; return true; }
+    return false;
+  }
+  function autoNameAll() {
+    for (const d of docs) if (applyAutoName(d)) DB.putDoc(d);
+    renderLibrary();
+    if (currentDoc) renderDocHeader();
   }
 
   const norm = (s) => (s || '').toLowerCase().replace(/ß/g, 'ss').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -312,6 +346,11 @@
     renaming = d;
     $('#nameInput').value = d.name;
     const sug = nameSuggestions(d.text);
+    let auto = null;
+    try { auto = DocName.suggest(d.text || '', { created: d.created }); } catch { auto = null; }
+    if (auto && !sug.includes(auto.name)) sug.unshift(auto.name);
+    if (sug.length > 4) sug.length = 4;
+    $('#nameAutoHint').hidden = !(d.auto && !d.named);
     const box = $('#nameSuggest');
     box.textContent = '';
     for (const s of sug) {
@@ -332,6 +371,8 @@
     const v = $('#nameInput').value.replace(/\s+/g, ' ').trim();
     d.name = v || docDefaultName(d.created);
     d.named = !!v;
+    d.auto = false;
+    if (!v) { delete d.autoKey; applyAutoName(d); } // leer = wieder automatisch benennen
     d.updated = Date.now();
     DB.putDoc(d);
     nameDialog.close();
@@ -521,13 +562,26 @@
       Img.release(c);
       return out;
     }
-    return { run, init, encodeFrame, reencode };
+    /** Entzerrte Seite ohne Filter als Canvas in Vorschaugröße (für die Regler). */
+    async function prepareView(job) {
+      if (await init()) {
+        const r = await call({ ...job, type: 'prepare' }, 60000);
+        if (r.ok) {
+          const img = await Img.load(r.result.blob);
+          const c = Img.draw(img, job.maxDim);
+          Img.release(img);
+          return c;
+        }
+      }
+      return (await Img.prepare(job)).c;
+    }
+    return { run, init, encodeFrame, reencode, prepareView };
   })();
 
   async function processPage(p) {
     const res = await Proc.run({
       original: p.original, rotation: p.rotation, corners: p.corners, filter: p.filter,
-      autoDetect: !!p.autoDetect, maxDim: MAX_DIM,
+      adjust: { b: p.bright || 0, c: p.contrast || 0 }, autoDetect: !!p.autoDetect, maxDim: MAX_DIM,
     });
     if (!p.autoDetect) delete res.corners;
     else res.autoDetect = false;
@@ -565,12 +619,12 @@
 
   /** Ersetzt das Foto einer Seite (Neu aufnehmen); Position, Filter und Dokument bleiben. */
   function replacePage(p, original, hint) {
-    const prev = { original: p.original, rotation: p.rotation, corners: p.corners, autoDetect: p.autoDetect, processed: p.processed, thumb: p.thumb, pw: p.pw, ph: p.ph, procKey: p.procKey, ocr: p.ocr, blur: p.blur };
+    const prev = { original: p.original, rotation: p.rotation, corners: p.corners, autoDetect: p.autoDetect, processed: p.processed, thumb: p.thumb, pw: p.pw, ph: p.ph, procKey: p.procKey, ocr: p.ocr, blur: p.blur, pdfText: p.pdfText };
     Object.assign(p, {
       original, rotation: 0,
       corners: (settings.autoCrop && hint) || Img.FULL.map((x) => x.slice()),
       autoDetect: settings.autoCrop,
-      processed: null, thumb: null, procKey: null, ocr: null, blur: null, error: false,
+      processed: null, thumb: null, procKey: null, ocr: null, blur: null, pdfText: null, error: false,
     });
     persist(p);
     schedule(p);
@@ -1402,9 +1456,11 @@
     if (newDocument) { pages.forEach(dropUrls); pages = []; currentDoc = null; }
     const n = await addFiles(files);
     const firstPdf = [...files].find((f) => PdfImport.isPdf(f));
-    if (n && newDocument && currentDoc && firstPdf && !currentDoc.named) {
+    // Dateiname übernehmen – außer bei Namen wie „Scan_0001.pdf“, dann automatisch benennen
+    if (n && newDocument && currentDoc && firstPdf && !currentDoc.named && !(settings.autoName && DocName.isGenericName(firstPdf.name))) {
       currentDoc.name = firstPdf.name.replace(/\.pdf$/i, '').slice(0, 120) || currentDoc.name;
       currentDoc.named = true;
+      currentDoc.auto = false;
       DB.putDoc(currentDoc);
     }
     if (n && newDocument && currentDoc) await openDoc(currentDoc);
@@ -1441,6 +1497,7 @@
 
   // ---------- Editor ----------
   const editor = { page: null, crop: null };
+  const adj = { on: false, loading: false, b: 0, c: 0, base: null, filtered: null, mode: null, raf: 0, token: 0 };
 
   function buildChips(container, current, onPick) {
     container.textContent = '';
@@ -1479,6 +1536,7 @@
     $('#edMovePrev').disabled = i <= 0;
     $('#edMoveNext').disabled = i >= pages.length - 1;
     markChips($('#filterChips'), p.filter);
+    markAdjust(p);
     updatePreview();
   }
 
@@ -1488,18 +1546,145 @@
     const url = urlFor(p, 'processed');
     const img = $('#edPreview');
     if (url && img.getAttribute('src') !== url) img.src = url;
-    img.hidden = !url;
-    $('#edSpinner').hidden = !p.pending;
+    img.hidden = !url || adj.on;
+    $('#edSpinner').hidden = !p.pending && !adj.loading;
+    $('#edAdjust').disabled = !p.processed;
     const lvl = p.pending ? 0 : blurLevel(p);
-    $('#edBlur').hidden = !lvl || !!editor.crop;
+    $('#edBlur').hidden = !lvl || !!editor.crop || adj.on;
     $('#edBlurText').textContent = lvl === 2 ? 'Foto ist unscharf – Text schwer lesbar.' : 'Foto wirkt unscharf.';
     $('#edPreviewWrap').classList.toggle('busy', !!p.pending);
   }
 
   function onEditorClosed() {
     if (editor.crop) endCrop();
+    if (adj.on) endAdjust('cancel');
     editor.page = null;
   }
+
+  // ---------- Helligkeit und Kontrast ----------
+  function markAdjust(p) {
+    const on = !!(p && ((p.bright || 0) || (p.contrast || 0)));
+    const btn = $('#edAdjust');
+    btn.classList.toggle('on', on);
+    btn.title = on ? `Helligkeit ${fmtAdj(p.bright || 0)}, Kontrast ${fmtAdj(p.contrast || 0)}` : 'Helligkeit und Kontrast';
+  }
+  const fmtAdj = (v) => (v > 0 ? `+${v}` : v < 0 ? `−${-v}` : '0');
+  function setAdjValues(b, c) {
+    adj.b = b; adj.c = c;
+    $('#adjBright').value = String(b);
+    $('#adjContrast').value = String(c);
+    $('#adjBrightVal').textContent = fmtAdj(b);
+    $('#adjContrastVal').textContent = fmtAdj(c);
+    queueAdjRender();
+  }
+  async function startAdjust() {
+    const p = editor.page;
+    if (!p || !p.processed || editor.crop || adj.on) return;
+    const token = ++adj.token;
+    adj.on = true;
+    adj.mode = p.filter;
+    $('#edTools').hidden = true;
+    $('#adjTools').hidden = false;
+    $('#edRetake').hidden = $('#edDelete').hidden = true;
+    setAdjValues(p.bright || 0, p.contrast || 0);
+    adj.loading = true;
+    updatePreview();
+    $('#edPreview').hidden = false; // bis die Vorschau bereitsteht, das bisherige Bild zeigen
+    try {
+      const c = await Proc.prepareView({ original: p.original, rotation: p.rotation, corners: p.corners, autoDetect: false, maxDim: 1200 });
+      if (token !== adj.token || !adj.on) { Img.release(c); return; }
+      adj.base = c;
+      adj.filtered = null;
+      if (adj.mode !== 'bw') {
+        // Filter einmal anwenden; die Regler ändern dann nur noch die Tonwertkurve (schnell)
+        const f = Img.canvas(c.width, c.height);
+        f.getContext('2d').drawImage(c, 0, 0);
+        Img.filter(f, adj.mode);
+        adj.filtered = f.getContext('2d').getImageData(0, 0, f.width, f.height);
+        Img.release(f);
+      }
+      const cv = $('#adjCanvas');
+      cv.width = c.width; cv.height = c.height;
+      renderAdjust();
+      cv.hidden = false;
+      $('#edPreview').hidden = true;
+    } catch (e) {
+      console.error(e);
+      if (token === adj.token) { toast('Vorschau nicht möglich.'); endAdjust('cancel'); }
+    } finally {
+      if (token === adj.token) { adj.loading = false; $('#edSpinner').hidden = !(editor.page && editor.page.pending); }
+    }
+  }
+  function queueAdjRender() {
+    if (adj.raf || !adj.base) return;
+    adj.raf = requestAnimationFrame(() => { adj.raf = 0; renderAdjust(); });
+  }
+  function renderAdjust() {
+    if (!adj.base) return;
+    const cv = $('#adjCanvas');
+    const x = cv.getContext('2d');
+    const a = { b: adj.b, c: adj.c };
+    if (adj.filtered) {
+      const out = x.createImageData(adj.filtered.width, adj.filtered.height);
+      Img.adjustData(adj.filtered.data, out.data, a);
+      x.putImageData(out, 0, 0);
+    } else {
+      const t = Img.canvas(adj.base.width, adj.base.height);
+      t.getContext('2d').drawImage(adj.base, 0, 0);
+      Img.finish(t, adj.mode, a);
+      x.drawImage(t, 0, 0);
+      Img.release(t);
+    }
+  }
+  /** mode: 'cancel' | 'apply' | 'all' (auf alle Seiten des Dokuments) */
+  function endAdjust(mode) {
+    const p = editor.page;
+    const b = adj.b, c = adj.c;
+    adj.on = false; adj.loading = false; adj.token++;
+    if (adj.raf) { cancelAnimationFrame(adj.raf); adj.raf = 0; }
+    Img.release(adj.base);
+    adj.base = null; adj.filtered = null;
+    const cv = $('#adjCanvas');
+    cv.hidden = true; cv.width = 0; cv.height = 0;
+    $('#adjTools').hidden = true;
+    $('#edTools').hidden = false;
+    $('#edRetake').hidden = $('#edDelete').hidden = false;
+    if (p && mode === 'apply' && ((p.bright || 0) !== b || (p.contrast || 0) !== c)) {
+      p.bright = b; p.contrast = c;
+      schedule(p);
+    } else if (p && mode === 'all') {
+      const prev = new Map(pages.map((q) => [q, [q.bright || 0, q.contrast || 0]]));
+      let n = 0;
+      for (const q of pages) {
+        if ((q.bright || 0) === b && (q.contrast || 0) === c) continue;
+        q.bright = b; q.contrast = c;
+        schedule(q);
+        n++;
+      }
+      toast(n ? `Auf ${pages.length === 1 ? 'die Seite' : `alle ${pages.length} Seiten`} angewendet.` : 'Alle Seiten haben bereits diese Einstellung.', n ? {
+        label: 'Rückgängig',
+        onClick: () => {
+          for (const [q, [pb, pc]] of prev) {
+            if (q.deleted || ((q.bright || 0) === pb && (q.contrast || 0) === pc)) continue;
+            q.bright = pb; q.contrast = pc;
+            schedule(q);
+          }
+          if (editor.page) markAdjust(editor.page);
+        },
+      } : undefined);
+    }
+    if (p) { markAdjust(p); updatePreview(); }
+  }
+  $('#edAdjust').addEventListener('click', startAdjust);
+  $('#adjBright').addEventListener('input', (e) => setAdjValues(+e.target.value, adj.c));
+  $('#adjContrast').addEventListener('input', (e) => setAdjValues(adj.b, +e.target.value));
+  // Doppeltippen auf einen Regler setzt ihn zurück
+  $('#adjBright').addEventListener('dblclick', () => setAdjValues(0, adj.c));
+  $('#adjContrast').addEventListener('dblclick', () => setAdjValues(adj.b, 0));
+  $('#adjReset').addEventListener('click', () => setAdjValues(0, 0));
+  $('#adjCancel').addEventListener('click', () => endAdjust('cancel'));
+  $('#adjApply').addEventListener('click', () => endAdjust('apply'));
+  $('#adjAll').addEventListener('click', () => endAdjust('all'));
 
   function movePage(delta) {
     const p = editor.page;
@@ -2024,11 +2209,17 @@
     $('#setAutoShoot').checked = settings.autoShoot;
     $('#setOcr').checked = settings.ocr;
     $('#setBlurWarn').checked = settings.blurWarn;
+    $('#setAutoName').checked = settings.autoName;
     setDialog.showModal();
   });
   $('#setAutoCrop').addEventListener('change', (e) => { settings.autoCrop = e.target.checked; saveSettings(); });
   $('#setAutoPdf').addEventListener('change', (e) => { settings.autoPdf = e.target.checked; saveSettings(); });
   $('#setWideFov').addEventListener('change', (e) => { settings.wideFov = e.target.checked; saveSettings(); });
+  $('#setAutoName').addEventListener('change', (e) => {
+    settings.autoName = e.target.checked;
+    saveSettings();
+    if (settings.autoName) { docs.forEach((d) => { if (!d.named) delete d.autoKey; }); autoNameAll(); }
+  });
   $('#setAutoShoot').addEventListener('change', (e) => { settings.autoShoot = e.target.checked; saveSettings(); });
   $('#setBlurWarn').addEventListener('change', (e) => { settings.blurWarn = e.target.checked; saveSettings(); renderGrid(); });
   $('#setOcr').addEventListener('change', (e) => {
@@ -2081,6 +2272,7 @@
     // Altlast: Seiten-Metadaten des übernommenen Dokuments einmal nachziehen
     const legacy = docs.find((d) => d.id === LEGACY_DOC);
     if (legacy && !legacy.thumb) refreshDocMeta(LEGACY_DOC);
+    autoNameAll(); // ältere, noch nicht benannte Dokumente
     renderLibrary();
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
       // Neue Version aktiv → neu laden, sobald nichts offen ist (Seiten sind gespeichert)

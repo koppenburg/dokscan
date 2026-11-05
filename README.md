@@ -7,6 +7,7 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 ## Funktionen
 
 - **Dokumentenablage:** Jeder Scan wird als eigenes Dokument gespeichert (Vorschau, Name, Seitenzahl, Datum). **Suche** über Namen *und* erkannten Text, Umbenennen mit Namensvorschlägen aus dem Text, Löschen, später weitere Seiten ergänzen.
+- **Automatische Benennung:** Aus dem erkannten Text der ersten Seite werden Datum, Absender und Art des Schreibens ermittelt, z. B. „2026-10-28 Stadtwerke Musterstadt Stromrechnung“ oder „2026-09-14 Finanzamt Musterstadt Einkommensteuerbescheid“. Der Name passt sich an, solange er nicht von Hand geändert wurde; leeres Namensfeld = wieder automatisch. Importierte PDFs behalten ihren Dateinamen, außer bei Namen wie „Scan_0001.pdf“. Abschaltbar in den Einstellungen.
 - **Serienaufnahme** mit der Rückkamera (Live-Vorschau, Auslöser, Licht/Taschenlampe falls verfügbar).
 - **Automatisch auslösen:** Liegt das Dokument ca. 1 Sekunde ruhig im Bild, wird das Foto von selbst gemacht (Fortschrittsring am Auslöser). Danach wartet die App, bis die nächste Seite aufgelegt ist – so entsteht kein Doppelfoto. Ein-/ausschaltbar über „Auto“ in der Kamera.
 - **Zoom & Kamerawahl:** Zoom-Tasten (z. B. 0,5× / 1× / 2×) und Zoomen mit zwei Fingern, Wechsel auf Ultraweitwinkel u. a. – sofern das Gerät es unterstützt. Modus **„Weites Sichtfeld“** (auf dem iPad automatisch aktiv) verhindert das stark vergrößerte Kamerabild.
@@ -17,6 +18,7 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 - **Unschärfe-Warnung**: Nach jeder Aufnahme wird die Schärfe gemessen. Wirkt ein Foto unscharf, erscheint direkt in der Kamera „Seite 3 wirkt unscharf – Neu aufnehmen“; zusätzlich Markierung in der Seitenübersicht, Hinweis im Editor und im PDF-Dialog. Abschaltbar in den Einstellungen.
 - **Seite neu aufnehmen**: Im Editor eine unscharfe oder schiefe Seite neu fotografieren – Position und Filter bleiben, „Rückgängig“ stellt das alte Foto wieder her.
 - **Filter:** Dokument (Schatten entfernen, weißes Papier), Original, Graustufen, Schwarz-Weiß.
+- **Helligkeit und Kontrast:** „Anpassen“ im Editor öffnet zwei Regler mit Live-Vorschau – für blasse Kopien, Durchschläge oder dunkle Fotos. „Alle Seiten“ überträgt die Einstellung auf das ganze Dokument (mit „Rückgängig“). Doppeltippen auf einen Regler setzt ihn zurück.
 - Seiten **drehen, löschen und per Ziehen umsortieren**.
 - **Texterkennung (OCR):** Der Text wird lokal auf dem Gerät erkannt (Tesseract, Deutsch). Das PDF wird durchsuchbar, Text lässt sich markieren und kopieren; im Editor zeigt „Text“ den erkannten Text zum Kopieren. Beim ersten Mal werden ca. 9 MB geladen, danach funktioniert es offline.
 - **Passwortschutz**: PDF optional mit Öffnen-Passwort (AES-256, PDF-Standard R6); das Passwort wird nicht gespeichert.
@@ -32,7 +34,7 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 2. Seiten nacheinander fotografieren (automatisch oder per Auslöser), dann **Fertig**.
 3. Das PDF wird sofort erstellt → **Teilen** oder **Speichern**.
 4. Das Dokument bleibt in der Ablage: antippen zum Ansehen, Ergänzen (Scannen/Importieren) oder erneuten PDF-Export; Name antippen zum Umbenennen.
-5. Seite antippen, um Zuschnitt, Drehung, Filter oder Reihenfolge zu ändern; „Text“ zeigt den erkannten Text.
+5. Seite antippen, um Zuschnitt, Drehung, Filter, Helligkeit/Kontrast oder Reihenfolge zu ändern; „Text“ zeigt den erkannten Text.
 
 ## Online nutzen
 
@@ -67,6 +69,7 @@ python3 -m http.server 8000
 | `proc-worker.js` | Hintergrund-Thread für die Bildverarbeitung |
 | `ocr.js`, `vendor/tesseract/` | Texterkennung (Tesseract, lokal eingebunden) |
 | `pdfimport.js`, `vendor/pdfjs/` | PDF-Import (pdf.js, lokal eingebunden) |
+| `naming.js` | Namensvorschlag aus dem Text (Datum, Absender, Dokumentart) |
 | `sw.js`, `manifest.webmanifest`, Icons | PWA / Offline |
 
 Nach Änderungen an App-Dateien `CACHE` in `sw.js` hochzählen, damit installierte Apps die neue Version laden.
