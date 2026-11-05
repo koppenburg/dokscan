@@ -53,28 +53,47 @@
               };
             }
           };
-          r.onsuccess = () => resolve(r.result);
+          r.onsuccess = () => {
+            const db = r.result;
+            // Verbindung verloren (iOS nach dem Hintergrund) oder neuere Version in anderem Tab → neu öffnen
+            db.onclose = () => { if (dbp === mine) dbp = null; };
+            db.onversionchange = () => { db.close(); if (dbp === mine) dbp = null; };
+            resolve(db);
+          };
           r.onerror = () => reject(r.error);
-        }).catch(() => null);
+          r.onblocked = () => console.warn('Datenbank wird von einem anderen Tab blockiert');
+        }).catch((e) => { console.warn('Datenbank nicht verfügbar', e); dbp = null; return null; });
+        const mine = dbp;
       }
       return dbp;
     };
+    const tx = (db, store, mode, fn) => new Promise((resolve, reject) => {
+      const t = db.transaction(store, mode);
+      const req = fn(t.objectStore(Array.isArray(store) ? store[0] : store));
+      t.oncomplete = () => resolve(req && req.result);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error || new DOMException('Abgebrochen', 'AbortError'));
+    });
     const run = async (store, mode, fn) => {
-      try {
-        const db = await open();
-        if (!db) return undefined;
-        return await new Promise((resolve, reject) => {
-          const t = db.transaction(store, mode);
-          const req = fn(t.objectStore(store));
-          t.oncomplete = () => resolve(req && req.result);
-          t.onerror = () => reject(t.error);
-          t.onabort = () => reject(t.error);
-        });
-      } catch (e) { console.warn('Speichern nicht möglich', e); return undefined; }
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const db = await open();
+          if (!db) { if (mode === 'readwrite') storageFailed(null); return undefined; }
+          return await tx(db, store, mode, fn);
+        } catch (e) {
+          // geschlossene Verbindung: einmal neu verbinden und wiederholen
+          if (attempt === 0 && e && (e.name === 'InvalidStateError' || e.name === 'UnknownError' || e.name === 'TransactionInactiveError')) { dbp = null; continue; }
+          console.warn('Speichern nicht möglich', e);
+          if (mode === 'readwrite') storageFailed(e);
+          return undefined;
+        }
+      }
+      return undefined;
     };
     return {
       pagesOf: (docId) => run('pages', 'readonly', (s) => s.index('docId').getAll(docId)),
       put: (rec) => run('pages', 'readwrite', (s) => s.put(rec)),
+      putMany: (recs) => run('pages', 'readwrite', (s) => { for (const r of recs) s.put(r); }),
       del: (id) => run('pages', 'readwrite', (s) => s.delete(id)),
       delPagesOf: (docId) => run('pages', 'readwrite', (s) => {
         s.index('docId').openKeyCursor(IDBKeyRange.only(docId)).onsuccess = (ev) => {
@@ -85,8 +104,31 @@
       docs: () => run('docs', 'readonly', (s) => s.getAll()),
       putDoc: (doc) => run('docs', 'readwrite', (s) => s.put(doc)),
       delDoc: (id) => run('docs', 'readwrite', (s) => s.delete(id)),
+      /** Dokument samt Seiten in einer Transaktion löschen. */
+      delDocAll: (id) => run(['docs', 'pages'], 'readwrite', (s) => {
+        const t = s.transaction;
+        t.objectStore('docs').delete(id);
+        const ps = t.objectStore('pages');
+        ps.index('docId').openKeyCursor(IDBKeyRange.only(id)).onsuccess = (ev) => {
+          const cur = ev.target.result;
+          if (cur) { ps.delete(cur.primaryKey); cur.continue(); }
+        };
+      }),
     };
   })();
+
+  // Speicherfehler sichtbar machen (sonst wären die Seiten nach dem Neuladen still verloren)
+  let storageWarnAt = 0;
+  function storageFailed(e) {
+    const now = Date.now();
+    if (now - storageWarnAt < 15000) return;
+    storageWarnAt = now;
+    const full = e && (e.name === 'QuotaExceededError' || /quota/i.test(e.message || ''));
+    const msg = !e ? 'Speichern nicht möglich: Dieser Browser erlaubt keinen Speicher (privater Modus?). Seiten gehen beim Schließen verloren.'
+      : full ? 'Gerätespeicher voll – Seiten konnten nicht gespeichert werden. Bitte Platz schaffen oder Dokumente löschen.'
+        : 'Speichern fehlgeschlagen – bitte die App neu laden, bevor du weiterscannst.';
+    setTimeout(() => toast(msg, null, 9000), 0);
+  }
 
   function docDefaultName(t) {
     const d = new Date(t);
@@ -110,8 +152,16 @@
     DB.put(record(p));
     touchDoc(p.docId);
   };
-  /** Reihenfolge der Seiten des offenen Dokuments übernehmen und speichern. */
-  const persistAll = () => pages.forEach((p, i) => { p.order = i; persist(p); });
+  /** Reihenfolge der Seiten des offenen Dokuments übernehmen und speichern (eine Transaktion). */
+  const persistAll = () => {
+    const recs = [];
+    pages.forEach((p, i) => { p.order = i; if (!p.deleted && p.docId) recs.push(record(p)); });
+    if (recs.length) DB.putMany(recs);
+    if (currentDoc) touchDoc(currentDoc.id);
+  };
+  // Reihenfolge neuer Seiten: wächst immer (auch wenn das Dokument gerade nicht offen ist)
+  let lastOrder = 0;
+  const nextOrder = () => (lastOrder = Math.max(lastOrder + 1, Date.now()));
 
   // ---------- Ablage (Dokumente) ----------
   let docs = [];            // Metadaten aller Dokumente
@@ -128,6 +178,7 @@
   const docTimers = new Map();
   /** Metadaten (Seitenzahl, Vorschau, Suchtext) eines Dokuments verzögert aktualisieren. */
   function touchDoc(docId) {
+    if (!docs.some((d) => d.id === docId)) return; // gelöscht
     clearTimeout(docTimers.get(docId));
     docTimers.set(docId, setTimeout(() => { docTimers.delete(docId); refreshDocMeta(docId); }, 400));
   }
@@ -138,10 +189,14 @@
     if (currentDoc && currentDoc.id === docId) list = pages;
     else list = ((await DB.pagesOf(docId)) || []).map((r) => inflight.get(r.id) || r).sort((a, b) => a.order - b.order);
     list = list.filter((p) => !p.deleted);
+    const sig = list.map((p) => p.id + ':' + (p.procKey || p.order)).join('|');
+    const text = list.map((p) => (p.ocr && p.ocr.text) || '').filter(Boolean).join('\n\n');
+    // „Geändert“ nur bei echten Änderungen (Seiten, Reihenfolge, Bearbeitung) – nicht beim bloßen Öffnen/Erkennen
+    if (d.sig !== sig || d.pageCount !== list.length) d.updated = Date.now();
+    d.sig = sig;
     d.pageCount = list.length;
     d.thumb = (list[0] && list[0].thumb) || null;
-    d.text = list.map((p) => (p.ocr && p.ocr.text) || '').filter(Boolean).join('\n\n');
-    d.updated = Date.now();
+    d.text = text;
     applyAutoName(d, list[0]);
     if (docs.includes(d)) DB.putDoc(d);
     renderLibrary();
@@ -296,8 +351,13 @@
     if (currentDoc !== d || !pages.length) {
       pages.forEach(dropUrls);
       currentDoc = d;
+      const token = (openDoc.token = (openDoc.token || 0) + 1);
       const recs = ((await DB.pagesOf(d.id)) || []).sort((a, b) => a.order - b.order);
-      pages = recs.map((r) => inflight.get(r.id) || { ...r, pending: false, error: false }).filter((p) => !p.deleted);
+      if (token !== openDoc.token || currentDoc !== d) return; // inzwischen anderes Dokument geöffnet
+      const loaded = recs.map((r) => inflight.get(r.id) || { ...r, pending: false, error: false });
+      // Seiten, die während des Ladens hinzugekommen sind, behalten
+      const extra = pages.filter((p) => p.docId === d.id && !loaded.some((q) => q.id === p.id));
+      pages = loaded.concat(extra).filter((p) => !p.deleted);
     }
     renderGrid();
     $('#overview').scrollTop = 0;
@@ -318,11 +378,14 @@
     const n = d.pageCount;
     if (!confirm(`„${d.name}“${n ? ` mit ${n === 1 ? '1 Seite' : `${n} Seiten`}` : ''} löschen?`)) return false;
     docs = docs.filter((x) => x !== d);
+    clearTimeout(docTimers.get(d.id)); docTimers.delete(d.id);
     for (const p of inflight.values()) if (p.docId === d.id) p.deleted = true;
     if (currentDoc === d) pages.forEach((p) => { p.deleted = true; });
-    await DB.delPagesOf(d.id);
-    await DB.delDoc(d.id);
-    if (currentDoc === d && topScreen() === 'docview') closeScreen();
+    await DB.delDocAll(d.id);
+    if (currentDoc === d) {
+      if (topScreen() === 'docview') closeScreen();
+      else { pages.forEach(dropUrls); pages = []; currentDoc = null; }
+    }
     renderLibrary();
     return true;
   }
@@ -381,7 +444,10 @@
     if (currentDoc === d) renderDocHeader();
   }
   $('#nameSave').addEventListener('click', saveRename);
-  $('#nameForm').addEventListener('submit', (e) => { if (e.submitter && e.submitter.value === 'close') return; e.preventDefault(); saveRename(); });
+  // Eingabetaste („Fertig“ auf der iPad-Tastatur) speichert den Namen
+  $('#nameForm').addEventListener('submit', (e) => { e.preventDefault(); saveRename(); });
+  // Schließen-Knöpfe sind keine Absende-Knöpfe (sonst würde die Eingabetaste den Dialog verwerfen)
+  document.querySelectorAll('dialog [data-close]').forEach((b) => b.addEventListener('click', () => b.closest('dialog').close()));
   nameDialog.addEventListener('click', (e) => { if (e.target === nameDialog) nameDialog.close(); });
 
   // Aktionen aus der Ablage
@@ -425,7 +491,10 @@
     return p[cache];
   }
   function dropUrls(p) {
-    for (const k of ['thumbUrl', 'processedUrl']) if (p[k]) URL.revokeObjectURL(p[k]);
+    for (const k of ['thumbUrl', 'processedUrl']) {
+      if (p[k]) URL.revokeObjectURL(p[k]);
+      delete p[k]; delete p[k + 'Of'];
+    }
   }
 
   // ---------- Verarbeitung (Warteschlange) ----------
@@ -469,7 +538,7 @@
         if (p.rev !== rev) continue; // wurde inzwischen geändert und neu eingereiht
         Object.assign(p, result, { pending: false, error: false, procKey: uid() });
         if (p.camSession && p.camSession === cam.session && blurLevel(p) && topScreen() === 'camera') warnBlurInCamera(p);
-        if (settings.ocr) ensureOcr(p).catch(() => {}); // Text im Hintergrund erkennen
+        if (settings.ocr && !p.deleted) ensureOcr(p).catch(() => {}); // Text im Hintergrund erkennen
       } catch (e) {
         console.error(e);
         if (p.rev === rev) { p.pending = false; p.error = true; }
@@ -595,22 +664,30 @@
     return job;
   }
 
-  function addFromCanvas(c, hint) {
-    return track(Img.toBlob(c, 'image/jpeg', 0.92).then((original) => addOriginal(original, hint)));
+  function addFromCanvas(c, hint, doc) {
+    return track(Img.toBlob(c, 'image/jpeg', 0.92).then((original) => addOriginal(original, hint, { doc })));
   }
 
+  /** Dokument, in das gerade aufgenommen/importiert wird (wird bei Bedarf angelegt). */
+  const targetDoc = () => currentDoc || (currentDoc = newDoc());
+  const docAlive = (d) => !!d && docs.includes(d);
+
+  /**
+   * Neue Seite anlegen. opts.doc legt das Zieldokument fest (beim Start des Imports/der Aufnahme
+   * bestimmt), damit Seiten nicht in einem inzwischen geöffneten anderen Dokument landen.
+   */
   function addOriginal(original, hint, opts = {}) {
     // Ränder: vorläufig aus der Live-Erkennung, genau erkannt wird im Hintergrund auf dem vollen Bild
     const corners = (settings.autoCrop && hint) || Img.FULL.map((x) => x.slice());
-    if (!currentDoc) currentDoc = newDoc();
+    const doc = opts.doc || targetDoc();
+    if (!docAlive(doc)) return null; // Dokument wurde inzwischen gelöscht
     const p = {
-      id: uid(), docId: currentDoc.id, order: pages.length, created: Date.now(), original, rotation: 0, corners,
+      id: uid(), docId: doc.id, order: nextOrder(), created: Date.now(), original, rotation: 0, corners,
       filter: opts.filter || settings.filter, processed: null, thumb: null,
       autoDetect: opts.autoDetect != null ? opts.autoDetect : settings.autoCrop,
       pdfText: opts.pdfText || null,
     };
-    pages.push(p);
-    renderGrid();
+    if (doc === currentDoc) { pages.push(p); renderGrid(); }
     persist(p);
     schedule(p);
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
@@ -619,7 +696,7 @@
 
   /** Ersetzt das Foto einer Seite (Neu aufnehmen); Position, Filter und Dokument bleiben. */
   function replacePage(p, original, hint) {
-    const prev = { original: p.original, rotation: p.rotation, corners: p.corners, autoDetect: p.autoDetect, processed: p.processed, thumb: p.thumb, pw: p.pw, ph: p.ph, procKey: p.procKey, ocr: p.ocr, blur: p.blur, pdfText: p.pdfText };
+    const prev = { original: p.original, rotation: p.rotation, corners: p.corners, autoDetect: p.autoDetect, processed: p.processed, thumb: p.thumb, pw: p.pw, ph: p.ph, procKey: p.procKey, ocr: p.ocr, blur: p.blur, pdfText: p.pdfText, filter: p.filter, bright: p.bright || 0, contrast: p.contrast || 0 };
     Object.assign(p, {
       original, rotation: 0,
       corners: (settings.autoCrop && hint) || Img.FULL.map((x) => x.slice()),
@@ -632,19 +709,24 @@
     toast(`Seite ${i} wurde neu aufgenommen.`, {
       label: 'Rückgängig',
       onClick: () => {
-        Object.assign(p, prev, { error: false });
+        if (p.deleted) return;
+        // Filter/Helligkeit, die nach dem Neu-Aufnehmen geändert wurden, bleiben erhalten
+        const keep = { filter: p.filter, bright: p.bright || 0, contrast: p.contrast || 0 };
+        const same = keep.filter === prev.filter && keep.bright === prev.bright && keep.contrast === prev.contrast;
+        Object.assign(p, prev, keep, { error: false });
         p.rev = (p.rev || 0) + 1; // laufende Verarbeitung des neuen Fotos verwerfen
+        queue.splice(0, queue.length, ...queue.filter((x) => x !== p));
         p.pending = false;
-        persist(p);
+        if (same) { persist(p); releaseInflight(p); } else schedule(p); // altes Foto mit aktuellem Filter neu aufbereiten
         renderCard(p);
-        if (editor.page === p) updatePreview();
+        if (editor.page === p) { updatePreview(); markChips($('#filterChips'), p.filter); }
         toast('Vorheriges Foto wiederhergestellt.');
       },
     });
   }
 
   /** PDF importieren: jede Seite als Bild (ohne Zuschnitt, Filter „Original“), vorhandener Text wird übernommen. */
-  async function addPdf(file) {
+  async function addPdf(file, doc) {
     let n = 0, total = 0;
     const gen = PdfImport.pages(file, {
       askPassword: (wrong) => prompt(wrong ? 'Falsches Passwort. Bitte erneut eingeben:' : `„${file.name}“ ist passwortgeschützt. Passwort:`),
@@ -655,26 +737,34 @@
     });
     toast('PDF wird geöffnet …');
     for await (const pg of gen) {
+      if (!docAlive(doc)) { toast('Import abgebrochen – Dokument wurde gelöscht.'); break; }
       const job = Promise.resolve(addOriginal(pg.blob, null, {
-        autoDetect: false, filter: 'original',
+        doc, autoDetect: false, filter: 'original',
         pdfText: pg.text ? { ...pg.text, w: pg.w, h: pg.h } : null,
       }));
-      await track(job);
+      if (!(await track(job))) break;
       n++;
       toast(`PDF wird importiert: Seite ${n} von ${total} …`);
     }
     return n;
   }
 
-  async function addFiles(files) {
+  let importing = 0; // laufende Importe (Service-Worker-Neuladen wartet darauf)
+  async function addFiles(files, doc) {
     const all = [...files];
     const isImage = (f) => f.type.startsWith('image/') || /\.(jpe?g|png|webp|heic|heif|gif|bmp)$/i.test(f.name);
     const list = all.filter((f) => isImage(f) || PdfImport.isPdf(f));
     if (!list.length) return 0;
-    let ok = 0;
+    doc = doc || targetDoc();
+    let ok = 0, i = 0;
+    const images = list.filter((f) => !PdfImport.isPdf(f)).length;
+    importing++;
+    try {
     for (const f of list) {
+      if (!docAlive(doc)) break;
+      if (!PdfImport.isPdf(f) && images > 1) toast(`Foto ${++i} von ${images} wird importiert …`, null, 60000);
       if (PdfImport.isPdf(f)) {
-        try { ok += await addPdf(f); }
+        try { ok += await addPdf(f, doc); }
         catch (e) {
           console.error(e);
           toast(e.cancelled ? 'PDF-Import abgebrochen.' : `„${f.name}“ konnte nicht gelesen werden.`);
@@ -684,14 +774,15 @@
       try {
         const img = await Img.load(f);
         const c = Img.draw(img, MAX_DIM);
-        await addFromCanvas(c);
+        const p = await addFromCanvas(c, null, doc);
         Img.release(c);
-        ok++;
+        if (p) ok++;
       } catch (e) {
         console.error(e);
         toast(`„${f.name}“ konnte nicht gelesen werden.`);
       }
     }
+    } finally { importing--; }
     return ok;
   }
 
@@ -704,6 +795,7 @@
   /** Liefert den erkannten Text der aktuellen Seitenversion (aus Cache oder neu erkannt). */
   function ensureOcr(p, onProgress) {
     const key = p.procKey;
+    if (p.deleted) return Promise.reject(new Error('Seite wurde gelöscht.'));
     if (!p.processed || !key) return Promise.reject(new Error('Seite ist noch nicht fertig verarbeitet.'));
     if (p.ocr && p.ocr.key === key) return Promise.resolve(p.ocr);
     // Seite aus einem PDF mit Text: Text direkt übernehmen (exakt, ohne Texterkennung), solange
@@ -864,50 +956,64 @@
     toast(list.length === 1 ? '1 Seite gelöscht.' : `${list.length} Seiten gelöscht.`);
   });
 
-  // Umsortieren per Ziehen am Griff
+  // Umsortieren per Ziehen am Griff. Die Zeiger-Erfassung liegt auf dem Raster (nicht auf dem Griff),
+  // weil die Karte beim Verschieben im DOM umgehängt wird und der Griff sonst die Erfassung verliert.
+  let dragging = null;
   grid.addEventListener('pointerdown', (e) => {
     const handle = e.target.closest('.drag');
-    if (!handle || sel.on) return;
+    if (!handle || sel.on || dragging || e.button > 0) return;
     e.preventDefault();
     const li = handle.closest('li');
+    const pid = e.pointerId;
     li.classList.add('dragging');
-    handle.setPointerCapture(e.pointerId);
+    try { grid.setPointerCapture(pid); } catch { /* egal */ }
     const main = $('#overview');
-    let lastY = e.clientY;
-    let scrollTimer = null;
-    const autoScroll = () => {
-      const r = main.getBoundingClientRect();
-      const edge = 70;
-      let dy = 0;
-      if (lastY < r.top + edge) dy = -12; else if (lastY > r.bottom - edge) dy = 12;
-      if (dy) main.scrollTop += dy;
-    };
-    scrollTimer = setInterval(autoScroll, 16);
-    const move = (ev) => {
-      lastY = ev.clientY;
-      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    let lastX = e.clientX, lastY = e.clientY;
+    const reorderAt = (x, y) => {
+      const el = document.elementFromPoint(x, y);
       const target = el && el.closest('#pageGrid > li');
       if (!target || target === li) return;
       const items = [...grid.children];
       if (items.indexOf(li) < items.indexOf(target)) target.after(li); else target.before(li);
     };
-    const end = () => {
+    const autoScroll = () => {
+      const r = main.getBoundingClientRect();
+      const edge = 70;
+      let dy = 0;
+      if (lastY < r.top + edge) dy = -12; else if (lastY > r.bottom - edge) dy = 12;
+      if (dy) { main.scrollTop += dy; reorderAt(lastX, lastY); } // auch bei ruhendem Finger weiter einsortieren
+    };
+    const scrollTimer = setInterval(autoScroll, 16);
+    const move = (ev) => {
+      if (ev.pointerId !== pid) return;
+      ev.preventDefault();
+      lastX = ev.clientX; lastY = ev.clientY;
+      reorderAt(lastX, lastY);
+    };
+    const end = (ev) => {
+      if (ev && ev.pointerId !== undefined && ev.pointerId !== pid) return;
+      if (!dragging) return;
+      dragging = null;
       clearInterval(scrollTimer);
-      handle.removeEventListener('pointermove', move);
-      handle.removeEventListener('pointerup', end);
-      handle.removeEventListener('pointercancel', end);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
+      grid.removeEventListener('lostpointercapture', end);
+      try { grid.releasePointerCapture(pid); } catch { /* egal */ }
       li.classList.remove('dragging');
       const order = [...grid.children].map((x) => x.dataset.id);
-      const changed = order.some((id, i) => pages[i].id !== id);
+      const changed = order.length === pages.length && order.some((id, i) => pages[i].id !== id);
       if (changed) {
-        pages = order.map((id) => pages.find((p) => p.id === id));
-        persistAll();
+        const next = order.map((id) => pages.find((p) => p.id === id));
+        if (next.every(Boolean)) { pages = next; persistAll(); }
       }
-      [...grid.children].forEach((x, i) => fillCard(x, pages[i], i));
+      renderGrid(); // Nummern und Reihenfolge immer aus dem Modell
     };
-    handle.addEventListener('pointermove', move);
-    handle.addEventListener('pointerup', end);
-    handle.addEventListener('pointercancel', end);
+    dragging = { li };
+    window.addEventListener('pointermove', move, { passive: false });
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
+    grid.addEventListener('lostpointercapture', end);
   });
 
   // ---------- Bildschirme & Zurück-Taste ----------
@@ -937,6 +1043,13 @@
   }
   window.addEventListener('popstate', (e) => {
     const depth = (e.state && e.state.dokscan) || 0;
+    // Zurück (Taste/Wischgeste) bei offenem Dialog: nur den Dialog schließen, die Ansicht bleibt
+    const open = [...document.querySelectorAll('dialog[open]')];
+    if (open.length && stack.length > depth) {
+      open.forEach((d) => d.close());
+      try { history.pushState({ dokscan: stack.length }, ''); } catch { /* egal */ }
+      return;
+    }
     while (stack.length > depth) popScreen();
   });
 
@@ -1176,8 +1289,11 @@
     } catch (e) {
       console.warn(e);
       const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+      if (denied) cam.denied = true; // für diese Sitzung merken: nächstes Mal gleich die Kamera-App
       setCamMsg(denied
-        ? 'Kein Zugriff auf die Kamera. Erlaube den Zugriff in den Browser-Einstellungen oder nutze die Kamera-App.'
+        ? (/iPad|iPhone|Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1
+          ? 'Kein Zugriff auf die Kamera. Erlaube ihn unter Einstellungen › Safari › Kamera (oder „aA“ › Website-Einstellungen) – oder nutze die Kamera-App.'
+          : 'Kein Zugriff auf die Kamera. Erlaube den Zugriff in den Browser-Einstellungen oder nutze die Kamera-App.')
         : 'Die Kamera konnte nicht gestartet werden. Du kannst stattdessen die Kamera-App verwenden.', true);
       return;
     }
@@ -1322,8 +1438,8 @@
     cam.session = uid();
     cam.newDoc = !retake && !!fromLibrary;
     if (cam.newDoc) { pages.forEach(dropUrls); pages = []; currentDoc = null; renderGrid(); }
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      $('#fileCapture').click();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || cam.denied) {
+      useCameraApp();
       return;
     }
     cam.added = 0;
@@ -1384,9 +1500,10 @@
     // neues Foto: als neue Seite anhängen – oder beim Neu-Aufnehmen die Seite ersetzen
     const stay = cam.retakeStay;
     const session = cam.session;
+    const doc = retake ? null : targetDoc();
     const deliver = (original) => {
-      if (retake) { replacePage(retake, original, hint); retake.camSession = session; }
-      else { const np = addOriginal(original, hint); np.camSession = session; }
+      if (retake) { if (!retake.deleted) { replacePage(retake, original, hint); retake.camSession = session; } }
+      else { const np = addOriginal(original, hint, { doc }); if (np) np.camSession = session; }
     };
     const img = $('#camLast img');
     const showThumb = (blob) => {
@@ -1432,7 +1549,20 @@
   $('#camClose').addEventListener('click', () => { cam.done = false; closeScreen(); });
   $('#camDone').addEventListener('click', () => { cam.done = true; closeScreen(); });
   $('#camLast').addEventListener('click', () => { cam.done = false; closeScreen(); });
-  $('#camFallback').addEventListener('click', () => { cam.done = false; closeScreen(); $('#fileCapture').click(); });
+  // Kamera-App des Geräts: was beim Öffnen der Kamera gewollt war, gilt auch für das Foto von dort
+  let pendingCapture = null;
+  function useCameraApp() {
+    pendingCapture = { retake: cam.retake, newDoc: cam.newDoc };
+    $('#fileCapture').click();
+  }
+  $('#camFallback').addEventListener('click', () => {
+    const intent = { retake: cam.retake, newDoc: cam.newDoc };
+    cam.done = false;
+    cam.newDoc = false; // nicht beim Schließen ein leeres Dokument öffnen
+    closeScreen();
+    pendingCapture = intent;
+    $('#fileCapture').click();
+  });
   $('#camTorch').addEventListener('click', async () => {
     if (!cam.track) return;
     try {
@@ -1453,25 +1583,46 @@
   let importNewDoc = false;
   async function importInto(files, newDocument) {
     if (!files || !files.length) return 0;
+    files = [...files];
     if (newDocument) { pages.forEach(dropUrls); pages = []; currentDoc = null; }
-    const n = await addFiles(files);
-    const firstPdf = [...files].find((f) => PdfImport.isPdf(f));
+    // Zieldokument jetzt festlegen: Seiten landen dort, auch wenn inzwischen ein anderes geöffnet wird
+    const doc = targetDoc();
+    const firstPdf = files.find((f) => PdfImport.isPdf(f));
     // Dateiname übernehmen – außer bei Namen wie „Scan_0001.pdf“, dann automatisch benennen
-    if (n && newDocument && currentDoc && firstPdf && !currentDoc.named && !(settings.autoName && DocName.isGenericName(firstPdf.name))) {
-      currentDoc.name = firstPdf.name.replace(/\.pdf$/i, '').slice(0, 120) || currentDoc.name;
-      currentDoc.named = true;
-      currentDoc.auto = false;
-      DB.putDoc(currentDoc);
+    if (newDocument && firstPdf && !doc.named && !(settings.autoName && DocName.isGenericName(firstPdf.name))) {
+      doc.name = firstPdf.name.replace(/\.pdf$/i, '').slice(0, 120) || doc.name;
+      doc.named = true;
+      doc.auto = false;
+      DB.putDoc(doc);
     }
-    if (n && newDocument && currentDoc) await openDoc(currentDoc);
+    // neues Dokument gleich öffnen, die Seiten erscheinen nach und nach
+    if (newDocument) await openDoc(doc);
+    const n = await addFiles(files, doc);
+    if (!n && newDocument) removeEmptyDoc(doc);
     return n;
   }
+  /** Leeres, eben angelegtes Dokument wieder entfernen (Import fehlgeschlagen/abgebrochen). */
+  async function removeEmptyDoc(d) {
+    if (!docAlive(d)) return;
+    const recs = (await DB.pagesOf(d.id)) || [];
+    if (recs.length || pages.some((p) => p.docId === d.id && !p.deleted)) return;
+    docs = docs.filter((x) => x !== d);
+    DB.delDocAll(d.id);
+    if (currentDoc === d) {
+      if (topScreen() === 'docview') closeScreen();
+      else { pages = []; currentDoc = null; }
+    }
+    renderLibrary();
+  }
   $('#fileCapture').addEventListener('change', async (e) => {
-    const files = e.target.files;
-    if (cam.retake && files && files.length) {
-      const p = cam.retake;
-      cam.retake = null;
-      e.target.value = '';
+    const files = [...(e.target.files || [])]; // Kopie: das Zurücksetzen leert die Liste
+    e.target.value = '';
+    const intent = pendingCapture || { retake: cam.retake, newDoc: cam.newDoc };
+    pendingCapture = null;
+    cam.retake = null;
+    if (intent.retake && files.length) {
+      const p = intent.retake;
+      if (p.deleted) return;
       try {
         const img = await Img.load(files[0]);
         const c = Img.draw(img, MAX_DIM);
@@ -1481,11 +1632,10 @@
       } catch (err) { console.error(err); toast('Foto konnte nicht gelesen werden.'); }
       return;
     }
-    cam.retake = null;
-    const n = await importInto(files, cam.newDoc);
+    if (!files.length) return;
+    const n = await importInto(files, intent.newDoc);
     cam.newDoc = false;
-    e.target.value = '';
-    if (n) toast('Seite hinzugefügt. Tippe auf „Scannen“ für die nächste.');
+    if (n) toast('Seite hinzugefügt. Für die nächste Seite wieder auf die Kamera tippen.');
   });
   $('#btnImport').addEventListener('click', () => { importNewDoc = false; $('#fileImport').click(); });
   $('#libImport').addEventListener('click', () => { importNewDoc = true; $('#fileImport').click(); });
@@ -2109,12 +2259,13 @@
     const text = $('#pdfProgressText');
     bar.style.width = '0%';
     try {
+      const password = $('#pdfLock').checked ? $('#pdfPw').value : '';
+      if ($('#pdfLock').checked && password.length < 4) throw new Error('Bitte ein Passwort mit mindestens 4 Zeichen eingeben.');
       if (!isIdle()) {
         text.textContent = 'Seiten werden noch bearbeitet …';
         await whenIdle();
       }
-      const password = $('#pdfLock').checked ? $('#pdfPw').value : '';
-      if ($('#pdfLock').checked && password.length < 4) throw new Error('Bitte ein Passwort mit mindestens 4 Zeichen eingeben.');
+      if (!pages.length) throw new Error('Das Dokument hat keine Seiten.');
       const blob = await buildPdf({
         format: settings.format, orient: settings.orient, margin: settings.margin,
         quality: settings.quality, maxBytes: settings.maxSize * 1024 * 1024, ocr: settings.ocr, password,
@@ -2160,6 +2311,16 @@
 
   $('#btnPdf').addEventListener('click', () => openPdf(false));
   $('#pdfGenerate').addEventListener('click', generatePdf);
+  // Eingabetaste in Dateiname/Passwort: PDF erstellen statt den Dialog zu schließen
+  $('#pdfForm').addEventListener('submit', (e) => { e.preventDefault(); });
+  for (const id of ['#pdfName', '#pdfPw']) {
+    $(id).addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.isComposing) return;
+      e.preventDefault();
+      e.target.blur();
+      if (!pdfState.busy) generatePdf();
+    });
+  }
   $('#pdfLock').addEventListener('change', () => {
     $('#pdfPwField').hidden = !$('#pdfLock').checked;
     if ($('#pdfLock').checked) setTimeout(() => $('#pdfPw').focus(), 50);
@@ -2234,7 +2395,7 @@
   let toastTimer = null;
   let toastHandler = null;
   /** Kurzer Hinweis; optional mit Aktion, z. B. { label: 'Rückgängig', onClick } */
-  function toast(msg, action) {
+  function toast(msg, action, ms) {
     const t = $('#toast');
     $('#toastText').textContent = msg;
     const btn = $('#toastAction');
@@ -2244,7 +2405,7 @@
     t.style.bottom = topScreen() === 'camera' ? 'calc(env(safe-area-inset-bottom) + 190px)' : '';
     t.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { t.classList.remove('show'); toastHandler = null; }, action ? 6000 : 2800);
+    toastTimer = setTimeout(() => { t.classList.remove('show'); toastHandler = null; }, ms || (action ? 6000 : 2800));
   }
   $('#toastAction').addEventListener('click', () => {
     const f = toastHandler;
@@ -2268,7 +2429,11 @@
   async function init() {
     Proc.init();
     renderLibrary();
-    docs = (await DB.docs()) || [];
+    // Zurück-Taste: nach einem Neuladen gibt es keine offenen Ansichten mehr
+    try { history.replaceState({ dokscan: 0 }, ''); } catch { /* egal */ }
+    const stored = (await DB.docs()) || [];
+    // Dokumente, die während des Ladens angelegt wurden, behalten
+    docs = stored.concat(docs.filter((d) => !stored.some((x) => x.id === d.id)));
     // Altlast: Seiten-Metadaten des übernommenen Dokuments einmal nachziehen
     const legacy = docs.find((d) => d.id === LEGACY_DOC);
     if (legacy && !legacy.thumb) refreshDocMeta(LEGACY_DOC);
@@ -2281,7 +2446,9 @@
       navigator.serviceWorker.addEventListener('controllerchange', () => {
         if (!hadController || reloading) return;
         const tryReload = () => {
-          if (stack.length || pdfDialog.open || setDialog.open || textDialog.open || nameDialog.open || docMenu.open || !isIdle()) { setTimeout(tryReload, 2000); return; }
+          // erst neu laden, wenn nichts offen ist und nichts mehr läuft (Import, Verarbeitung, Texterkennung, Speichern)
+          const ocrBusy = [...inflight.values()].some((p) => p.ocrJob);
+          if (stack.length || document.querySelector('dialog[open]') || !isIdle() || importing || ocrBusy || docTimers.size) { setTimeout(tryReload, 2000); return; }
           reloading = true;
           location.reload();
         };
