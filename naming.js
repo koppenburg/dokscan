@@ -45,7 +45,7 @@ const DocName = (() => {
         if (!date) continue;
         let s = 1 + (1 - i / total);
         const before = l.slice(Math.max(0, pos - 40), pos);
-        if (/(geburtsdatum|geb\.|geboren)/.test(l)) s -= 6;
+        if (/(geburtsdatum|geb\.|geboren)\s*:?\s*(am\s*)?$/.test(before)) s -= 6;
         if (/datum/.test(before)) s += 2.5;
         else if (/\bvom\b/.test(before)) s += 1;
         if ((line.match(/\S+/g) || []).length > 9) s -= 1; // Datum mitten im Fließtext
@@ -233,9 +233,142 @@ const DocName = (() => {
     return { name, date: iso(date), dateFound: !!best, sender, kind };
   }
 
+  // ---------- Fristen und Termine ----------
+  const NUM_WORDS = { ein: 1, einen: 1, einem: 1, einer: 1, eines: 1, zwei: 2, drei: 3, vier: 4, fünf: 5, sechs: 6, sieben: 7, acht: 8, zehn: 10, zwölf: 12, vierzehn: 14, einundzwanzig: 21, dreißig: 30 };
+  const LABELS = [
+    [/einspruch/, 'Einspruch'],
+    [/widerspruch/, 'Widerspruch'],
+    [/\bklage/, 'Klage'],
+    [/\bendet\b|vertragsende|läuft .*aus|ende der (mitgliedschaft|laufzeit|vertrags)/, 'Vertragsende'],
+    [/kündig/, 'Kündigung'],
+    [/abgebucht|abbuch|lastschrift|eingezogen/, 'Abbuchung'],
+    [/zahlbar|zahlen|zahlung|überweis|begleich|ausgleich|fällig|betrag|zahlungsziel|entricht/, 'Zahlung'],
+    [/zurück(zu)?send|rücksend|einreich|nachreich|vorleg|vorzuleg|mitteil|mitzuteil|antwort|rückmeld|zurückmeld|melden|einsend|unterschrieben|einzureichen|abgeben|abzugeben/, 'Rückmeldung'],
+    [/gültig|befristet|läuft .*ab|ablauf/, 'Gültig bis'],
+    [/frist|spätestens|bis zum|bis einschließlich|nicht später als/, 'Frist'],
+  ];
+  const isoT = (d) => iso(d);
+  const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+  const addMonths = (d, n) => {
+    const t = new Date(d.getFullYear(), d.getMonth() + n, d.getDate());
+    return t.getDate() !== d.getDate() ? new Date(t.getFullYear(), t.getMonth(), 0) : t; // 31.01. + 1 Monat → 28./29.02.
+  };
+  /** Satzanfang vor einer Position (damit Wörter aus dem vorigen Satz nicht zählen). */
+  function clauseBefore(t, pos, max) {
+    let w = t.slice(Math.max(0, pos - max), pos);
+    const cut = Math.max(w.search(/[!?;]\s[^!?;]*$/), (() => { let k = -1; const re = /[a-zäöüß)]\.\s+(?=[A-ZÄÖÜ])/g; let m; while ((m = re.exec(w))) k = m.index + 1; return k; })());
+    if (cut > 0) w = w.slice(cut + 1);
+    return w;
+  }
+
+  /**
+   * Fristen und Termine im Text: explizite Daten mit Fristwort davor („zahlbar bis 20.11.2026“, „spätestens am …“,
+   * „Termin am … um 10:30 Uhr“) und relative Fristen („innerhalb eines Monats nach Bekanntgabe Einspruch“) ab dem
+   * Briefdatum. Zeiträume („01.10.2025 bis 30.09.2026“), Geburts- und Bezugsdaten („Ihr Schreiben vom …“) zählen nicht.
+   * @returns {Array<{id:string, date:string, time:string|null, label:string, snippet:string, approx:boolean}>}
+   */
+  function deadlines(text, opts = {}) {
+    if (!text) return [];
+    const now = new Date(opts.now || Date.now());
+    const base = opts.letterDate ? new Date(opts.letterDate + 'T00:00:00') : null;
+    const from = base || addDays(now, -60);
+    const until = addDays(base || now, 3 * 366);
+    const t = text.slice(0, 20000).replace(/\s+/g, ' ');
+    const lt = lower(t);
+    const out = new Map();
+    const push = (date, time, label, pos, len, approx) => {
+      if (!date || date < from || date > until) return;
+      const d = isoT(date);
+      const id = `${label}|${d}${time ? ' ' + time : ''}`;
+      if (out.has(id)) return;
+      const snippet = t.slice(Math.max(0, pos - 70), pos + len + 40).trim();
+      out.set(id, { id, date: d, time: time || null, label, snippet, approx: !!approx });
+    };
+    // Datumsangaben im ganzen Text
+    const dates = [];
+    const num = /(?<![\d.])(\d{1,2}) ?\. ?(\d{1,2}) ?\. ?(\d{4}|\d{2})(?![\d])/g;
+    for (let m; (m = num.exec(t));) dates.push({ pos: m.index, len: m[0].length, date: validDate(year(+m[3], now), +m[2], +m[1]) });
+    const txt = new RegExp(`(?<!\\d)(\\d{1,2})\\.? ?(${MONTH_RE})\\.? ?(\\d{4})(?!\\d)`, 'gi');
+    for (let m; (m = txt.exec(t));) dates.push({ pos: m.index, len: m[0].length, date: validDate(+m[3], MONTHS[lower(m[2])], +m[1]) });
+    dates.sort((a, b) => a.pos - b.pos);
+    dates.forEach((x, k) => {
+      if (!x.date) return;
+      const before = lower(clauseBefore(t, x.pos, 90));
+      const near = before.slice(-45);
+      const after = lt.slice(x.pos + x.len, x.pos + x.len + 40);
+      // keine Frist: Geburtsdatum, Bezug auf frühere Schreiben, Zeitraum „von … bis …“
+      if (/geb\.|geboren|geburt/.test(near)) return;
+      const prev = dates[k - 1], next = dates[k + 1];
+      if (prev && x.pos - (prev.pos + prev.len) < 8 && /^\s*(bis|-|–|—)\s*$/.test(lt.slice(prev.pos + prev.len, x.pos))) return;
+      if (next && next.pos - (x.pos + x.len) < 8 && /^\s*(bis|-|–|—)\s*$/.test(lt.slice(x.pos + x.len, next.pos))) return;
+      if (/\b(vom|datum|schreiben|stand|zeitraum|leistungszeitraum|abrechnungszeitraum|seit)\s*:?\s*(dem\s*)?$/.test(near)) return;
+      // Termin mit Uhrzeit
+      const tm = after.match(/^\s*,?\s*(?:(?:um|ab|von)\s*(\d{1,2})(?:[:.](\d{2}))?|(\d{1,2})[:.](\d{2}))\s*(?:uhr|h\b)/);
+      const hh = tm ? +(tm[1] || tm[3]) : 99;
+      if (tm && hh < 24) {
+        const time = `${String(hh).padStart(2, '0')}:${tm[2] || tm[4] || '00'}`;
+        const lbl = /einspruch|widerspruch|zahl|frist/.test(near) && LABELS.find(([re]) => re.test(near));
+        push(x.date, time, lbl ? lbl[1] : 'Termin', x.pos, x.len + tm[0].length, false);
+        return;
+      }
+      const weekday = /(montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag),?\s*(den\s*)?$/.test(near);
+      if (!weekday && /[a-zäöüß], ?(den )?$/.test(near)) return; // „Musterstadt, den …“ = Briefdatum
+      if (/termin|findet|statt|erscheinen|untersuchung|sprechstunde|besichtigung|verhandlung|einladung/.test(near) && /\bam\s*$|\bam\s+[a-zäöüß]+,?\s*(den\s*)?$/.test(near)) {
+        push(x.date, null, 'Termin', x.pos, x.len, false);
+        return;
+      }
+      // Fristwort kurz vor dem Datum („bis“, „spätestens“, „fällig am“ …)
+      if (!/(bis|spätestens|frist|fällig|fälligkeit|zahlungsziel|gültig|abgebucht|eingezogen|zum|am|bis zum)\s*(zum|am|den)?\s*:?\s*$/.test(near)) return;
+      if (/\b(am|zum)\s*$/.test(near) && /(erhalten|eingegangen|geschrieben|versandt|zugestellt)/.test(after.slice(0, 30))) return; // „am 01.11. erhalten“
+      const hit = LABELS.find(([re]) => re.test(before + ' ' + after));
+      if (!hit) return;
+      push(x.date, null, hit[1], x.pos, x.len, false);
+    });
+    // relative Fristen ab dem Briefdatum
+    if (base) {
+      const rel = /(?:innerhalb|binnen)\s+(?:von\s+)?(\d{1,3}|[a-zäöüß]+)\s+(tag|tagen|woche|wochen|monat|monats|monaten)\b([^.;]{0,140})/g;
+      for (let m; (m = rel.exec(lt));) {
+        const n = /^\d+$/.test(m[1]) ? +m[1] : NUM_WORDS[m[1]];
+        if (!n || n > 400) continue;
+        const sentence = lower(clauseBefore(t, m.index, 160)) + ' ' + m[0];
+        const hit = LABELS.find(([re]) => re.test(sentence));
+        if (!hit || hit[1] === 'Gültig bis' || hit[1] === 'Abbuchung') continue;
+        const unit = m[2];
+        let d = /^tag/.test(unit) ? addDays(base, n) : /^woche/.test(unit) ? addDays(base, 7 * n) : addMonths(base, n);
+        // Bescheide gelten am 4. Tag nach Aufgabe zur Post als bekannt gegeben (§ 122 AO, seit 2025)
+        if (/bekanntgabe|zugang|zustellung|erhalt/.test(m[0])) d = /^monat/.test(unit) ? addMonths(addDays(base, 4), n) : addDays(d, 4);
+        push(d, null, hit[1], m.index, m[0].length, true);
+      }
+    }
+    return [...out.values()].sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
+  }
+
+  /** Briefdaten für Sortierung/Anzeige: Datum des Schreibens (nur wenn im Text gefunden), Absender, Art. */
+  function letterInfo(text, opts = {}) {
+    if (!text || text.length < 20) return null;
+    const now = new Date(opts.now || Date.now());
+    const toLines = (x) => x.slice(0, 8000).split(/\n/).map((l) => l.trim()).filter(Boolean);
+    const first = opts.firstPage && opts.firstPage.trim().length >= 20 ? toLines(opts.firstPage) : toLines(text);
+    const best = findDates(first, now).find((d) => d.score > 0);
+    const kind = findKind(first.slice(0, 60));
+    let sender = findSender(first);
+    if (sender && kind && lower(sender).includes(lower(kind))) sender = null;
+    return { date: best ? iso(best.date) : null, sender: sender || null, kind: kind || null };
+  }
+
+  /** Grundform der Dokumentart für Schlagwörter: „Stromrechnung“ → „Rechnung“, „Einkommensteuerbescheid“ → „Bescheid“. */
+  function kindBase(kind) {
+    if (!kind) return null;
+    const lk = lower(kind).replace(/-/g, '');
+    const k = KINDS.filter(([r]) => lk.endsWith(r)).sort((a, b) => b[0].length - a[0].length)[0];
+    if (!k) return kind;
+    const r = k[0] === 'zahlungserinnerung' ? 'mahnung' : k[0];
+    return r[0].toUpperCase() + r.slice(1);
+  }
+
   /** Allgemeine Dateinamen (z. B. „Scan_0001“, „IMG_1234“, „Dokument (2)“), die ersetzt werden dürfen. */
   const isGenericName = (n) => /^(?:scan(?:ned)?|scanner|img|image|bild|foto|photo|dsc|doc|dok|document|dokument|datei|file|unbenannt|untitled|neu|new|pdf|print|druck|cam|kopie|copy)?[\s_\-().\d]*$/i.test((n || '').replace(/\.pdf$/i, '').trim());
 
-  return { suggest, isGenericName, _internals: { findDates, findKind, findSender } };
+  return { suggest, letterInfo, deadlines, kindBase, isGenericName, _internals: { findDates, findKind, findSender } };
 })();
 if (typeof module !== 'undefined') module.exports = DocName;

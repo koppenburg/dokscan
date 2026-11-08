@@ -12,7 +12,7 @@
 
   // ---------- Einstellungen ----------
   const IS_IPAD = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true, blurWarn: true, orient: 'auto', margin: 0, maxSize: 0, autoName: true };
+  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true, blurWarn: true, orient: 'auto', margin: 0, maxSize: 0, autoName: true, libSort: 'updated', libFilter: 'all' };
   const settings = (() => {
     try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('dokscan.settings') || '{}') }; }
     catch { return { ...DEFAULTS }; }
@@ -198,10 +198,50 @@
     d.thumb = (list[0] && list[0].thumb) || null;
     d.text = text;
     applyAutoName(d, list[0]);
+    updateLetterMeta(d, list[0]);
     if (docs.includes(d)) DB.putDoc(d);
     renderLibrary();
     if (currentDoc === d) renderDocHeader();
   }
+
+  /** Briefdatum, Absender, Art und erkannte Fristen aus dem Text (für Sortierung, Schlagwort-Vorschläge, Fristen). */
+  function updateLetterMeta(d, first) {
+    const firstText = first && first.ocr ? first.ocr.text : '';
+    const key = `${(d.text || '').length}:${first && first.ocr ? first.ocr.key : '-'}`;
+    if (d.metaKey === key) return false;
+    d.metaKey = key;
+    let info = null, found = [];
+    try { info = d.text ? DocName.letterInfo(d.text, { firstPage: firstText }) : null; } catch (e) { info = null; }
+    try { found = d.text ? DocName.deadlines(d.text, { letterDate: info && info.date }) : []; } catch (e) { found = []; }
+    d.letter = info;
+    d.autoDeadlines = found;
+    return true;
+  }
+
+  // ---------- Fristen ----------
+  const todayIso = () => { const t = new Date(); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`; };
+  /** Alle Fristen eines Dokuments (erkannte ohne ausgeblendete + eigene), mit Status. */
+  function docDeadlines(d) {
+    const hidden = d.dlHidden || {}, done = d.dlDone || {};
+    const list = (d.autoDeadlines || []).filter((x) => !hidden[x.id]).concat(d.manualDeadlines || []);
+    return list.map((x) => ({ ...x, done: !!done[x.id] }))
+      .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
+  }
+  /** Nächste offene Frist (überfällige zuerst), sonst null. */
+  const nextDeadline = (d) => docDeadlines(d).find((x) => !x.done) || null;
+  const daysUntil = (iso) => Math.round((new Date(iso + 'T00:00:00') - new Date(todayIso() + 'T00:00:00')) / 86400000);
+  function fmtDay(iso, withWeekday) {
+    const d = new Date(iso + 'T00:00:00');
+    const p = (n) => String(n).padStart(2, '0');
+    const wd = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'][d.getDay()];
+    return `${withWeekday ? wd + ', ' : ''}${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`;
+  }
+  function relDays(iso) {
+    const n = daysUntil(iso);
+    return n === 0 ? 'heute' : n === 1 ? 'morgen' : n === -1 ? 'gestern' : n > 0 ? `in ${n} Tagen` : `seit ${-n} Tagen überfällig`;
+  }
+  const dlUrgency = (x) => (x.done ? 'done' : daysUntil(x.date) < 0 ? 'over' : daysUntil(x.date) <= 7 ? 'soon' : 'later');
+  const dlPhrase = (x) => (x.label === 'Termin' ? 'Termin am' : x.label === 'Gültig bis' ? 'Gültig bis' : x.label === 'Abbuchung' ? 'Abbuchung am' : x.label === 'Vertragsende' ? 'Vertragsende' : `${x.label} bis`);
 
   /**
    * Automatischer Name aus dem erkannten Text („2026-11-05 Finanzamt Musterstadt Bescheid“),
@@ -272,19 +312,86 @@
 
   const docList = $('#docList');
   const libThumbs = new Map(); // docId → { blob, url }
+  /** Alle Schlagwörter der Ablage (alphabetisch). */
+  const allTags = () => [...new Set(docs.flatMap((d) => d.tags || []))].sort((a, b) => a.localeCompare(b, 'de'));
+  const MONTHS_DE = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+  const letterDay = (d) => (d.letter && d.letter.date) || null;
+  function sortedDocs(list, mode) {
+    const byUpdated = (a, b) => b.updated - a.updated;
+    const dayOf = (d) => letterDay(d) || new Date(d.created).toISOString().slice(0, 10);
+    if (mode === 'letter') return list.sort((a, b) => dayOf(b).localeCompare(dayOf(a)) || byUpdated(a, b));
+    if (mode === 'sender') {
+      const key = (d) => (d.letter && d.letter.sender) || '';
+      return list.sort((a, b) => (!key(a) - !key(b)) || key(a).localeCompare(key(b), 'de') || dayOf(b).localeCompare(dayOf(a)));
+    }
+    if (mode === 'name') return list.sort((a, b) => a.name.localeCompare(b.name, 'de', { numeric: true }));
+    return list.sort(byUpdated);
+  }
+  function groupOf(d, mode) {
+    if (mode === 'letter') {
+      const day = letterDay(d) || new Date(d.created).toISOString().slice(0, 10);
+      return `${MONTHS_DE[+day.slice(5, 7) - 1]} ${day.slice(0, 4)}`;
+    }
+    if (mode === 'sender') return (d.letter && d.letter.sender) || 'Ohne erkannten Absender';
+    return null;
+  }
+
+  function renderLibFilter() {
+    const box = $('#libFilter');
+    const tags = allTags();
+    const nDl = docs.filter((d) => nextDeadline(d)).length;
+    if (settings.libFilter.startsWith('tag:') && !tags.includes(settings.libFilter.slice(4))) settings.libFilter = 'all';
+    if (settings.libFilter === 'deadlines' && !nDl) settings.libFilter = 'all';
+    const items = [['all', 'Alle']];
+    if (nDl) items.push(['deadlines', `Fristen (${nDl})`]);
+    for (const t of tags) items.push(['tag:' + t, t]);
+    box.textContent = '';
+    for (const [key, label] of items) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip' + (key === 'deadlines' ? ' chip-dl' : key.startsWith('tag:') ? ' chip-tag' : '');
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', String(settings.libFilter === key));
+      b.textContent = label;
+      b.addEventListener('click', () => { settings.libFilter = key; saveSettings(); renderLibrary(); });
+      box.appendChild(b);
+    }
+    $('#libSort').value = settings.libSort;
+    // Filter nur zeigen, wenn es etwas zu filtern gibt
+    $('#libFilter').hidden = items.length < 2;
+  }
+
   function renderLibrary() {
     const q = norm($('#libSearch').value.trim());
-    const sorted = docs.slice().sort((a, b) => b.updated - a.updated);
+    renderLibFilter();
+    const f = settings.libFilter;
+    let list = docs.slice();
+    if (f === 'deadlines') list = list.filter((d) => nextDeadline(d));
+    else if (f.startsWith('tag:')) list = list.filter((d) => (d.tags || []).includes(f.slice(4)));
+    const mode = f === 'deadlines' ? 'deadlines' : settings.libSort;
+    if (mode === 'deadlines') list.sort((a, b) => (nextDeadline(a).date + (nextDeadline(a).time || '')).localeCompare(nextDeadline(b).date + (nextDeadline(b).time || '')));
+    else sortedDocs(list, mode);
     docList.textContent = '';
-    let shown = 0;
-    for (const d of sorted) {
+    let shown = 0, lastGroup = null;
+    for (const d of list) {
       let snip = '';
       if (q) {
-        const inName = norm(d.name).includes(q);
+        const extra = [...(d.tags || []), d.letter && d.letter.sender, d.letter && d.letter.kind].filter(Boolean).join(' ');
+        const inName = norm(d.name).includes(q) || norm(extra).includes(q);
         snip = snippet(d.text || '', q);
         if (!inName && !snip) continue;
       }
       shown++;
+      const group = groupOf(d, mode);
+      if (group && group !== lastGroup) {
+        lastGroup = group;
+        const gh = document.createElement('li');
+        gh.className = 'lib-group';
+        const h = document.createElement('h3');
+        h.textContent = group;
+        gh.appendChild(h);
+        docList.appendChild(gh);
+      }
       const li = document.createElement('li');
       li.className = 'doc-item';
       li.dataset.id = d.id;
@@ -313,8 +420,27 @@
       highlight(name, d.name, q);
       const info = document.createElement('span');
       info.className = 'muted';
-      info.textContent = `${d.pageCount === 1 ? '1 Seite' : `${d.pageCount} Seiten`} · ${fmtDate(d.updated)}`;
+      const pagesTxt = d.pageCount === 1 ? '1 Seite' : `${d.pageCount} Seiten`;
+      const when = (mode === 'letter' || mode === 'sender') && letterDay(d) ? `Brief vom ${fmtDay(letterDay(d))}` : fmtDate(d.updated);
+      info.textContent = `${pagesTxt} · ${when}`;
       meta.append(name, info);
+      const nd = nextDeadline(d);
+      let dlText = '';
+      if (nd) {
+        const badge = document.createElement('span');
+        badge.className = `dl-badge ${dlUrgency(nd)}`;
+        dlText = `${dlPhrase(nd)} ${fmtDay(nd.date)}${nd.time ? ' ' + nd.time + ' Uhr' : ''} (${relDays(nd.date)})`;
+        badge.innerHTML = '<svg class="ic"><use href="#i-clock"/></svg>';
+        const short = fmtDay(nd.date).slice(0, nd.date.slice(0, 4) === todayIso().slice(0, 4) ? 6 : 10);
+        badge.append(`${dlPhrase(nd)} ${short}${nd.time ? ' ' + nd.time : ''} · ${relDays(nd.date)}`);
+        meta.append(badge);
+      }
+      if (d.tags && d.tags.length) {
+        const tg = document.createElement('span');
+        tg.className = 'doc-tags';
+        for (const t of d.tags) { const c = document.createElement('span'); c.className = 'tag'; c.textContent = t; tg.appendChild(c); }
+        meta.append(tg);
+      }
       if (snip) {
         const sn = document.createElement('span');
         sn.className = 'doc-snippet';
@@ -322,7 +448,7 @@
         meta.append(sn);
       }
       open.append(thumbEl, meta);
-      open.setAttribute('aria-label', `${d.name}, ${d.pageCount === 1 ? '1 Seite' : `${d.pageCount} Seiten`}, ${fmtDate(d.updated)} – öffnen`);
+      open.setAttribute('aria-label', `${d.name}, ${pagesTxt}, ${when}${dlText ? ', ' + dlText : ''}${d.tags && d.tags.length ? ', Schlagwörter: ' + d.tags.join(', ') : ''} – öffnen`);
       const more = document.createElement('button');
       more.type = 'button';
       more.className = 'icon-btn doc-more';
@@ -335,10 +461,13 @@
     const n = docs.length;
     $('#empty').hidden = n > 0;
     $('#libSearchWrap').hidden = n === 0;
-    $('#libNoHits').hidden = !(n && q && !shown);
+    $('#libTools').hidden = n < 2 && !allTags().length;
+    $('#libNoHits').hidden = !(n && !shown);
+    $('#libNoHits').textContent = q ? 'Keine Treffer.' : 'Keine Dokumente in dieser Auswahl.';
     $('#libInfo').textContent = n === 0 ? 'Keine Dokumente' : n === 1 ? '1 Dokument' : `${n} Dokumente`;
     updateHomeHint();
   }
+  $('#libSort').addEventListener('change', (e) => { settings.libSort = e.target.value; saveSettings(); renderLibrary(); });
 
   function renderDocHeader() {
     const d = currentDoc;
@@ -346,7 +475,229 @@
     const n = pages.length;
     $('#docInfo').textContent = n === 0 ? 'Keine Seiten' : n === 1 ? '1 Seite' : `${n} Seiten`;
     $('#docTitle').setAttribute('aria-label', `${d ? d.name : 'Neues Dokument'}, ${$('#docInfo').textContent} – umbenennen`);
+    renderDocMeta();
   }
+
+  /** Fristen und Schlagwörter oben in der Dokumentansicht. */
+  function renderDocMeta() {
+    const d = currentDoc;
+    const bar = $('#docMetaBar');
+    bar.hidden = !d || !pages.length;
+    if (!d) return;
+    const ul = $('#dlList');
+    ul.textContent = '';
+    for (const x of docDeadlines(d)) {
+      const li = document.createElement('li');
+      li.className = `dl-item ${dlUrgency(x)}`;
+      const txt = document.createElement('div');
+      txt.className = 'dl-text';
+      const b = document.createElement('b');
+      b.textContent = `${dlPhrase(x)} ${fmtDay(x.date, true)}${x.time ? ', ' + x.time + ' Uhr' : ''}`;
+      const sub = document.createElement('span');
+      sub.className = 'muted small';
+      sub.textContent = x.done ? 'Erledigt' : `${relDays(x.date)}${x.approx ? ' · berechnet, bitte prüfen' : ''}${x.source === 'manual' ? ' · eigene Frist' : ''}`;
+      txt.append(b, sub);
+      if (x.snippet) { li.title = x.snippet; }
+      const acts = document.createElement('div');
+      acts.className = 'dl-acts';
+      const mk = (icon, label, fn, cls) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'icon-btn' + (cls ? ' ' + cls : '');
+        btn.setAttribute('aria-label', label);
+        btn.title = label;
+        btn.innerHTML = `<svg class="ic"><use href="#${icon}"/></svg>`;
+        btn.addEventListener('click', fn);
+        return btn;
+      };
+      if (!x.done) acts.append(mk('i-cal', 'In den Kalender', () => addToCalendar(d, x)));
+      acts.append(mk(x.done ? 'i-undo' : 'i-check', x.done ? 'Wieder öffnen' : 'Erledigt', () => toggleDone(d, x)));
+      acts.append(mk('i-pencil', 'Bearbeiten', () => editDeadline(d, x)));
+      li.append(txt, acts);
+      ul.appendChild(li);
+    }
+    ul.hidden = !ul.children.length;
+    const tagBox = $('#docTags');
+    tagBox.textContent = '';
+    for (const t of d.tags || []) { const c = document.createElement('span'); c.className = 'tag'; c.textContent = t; tagBox.appendChild(c); }
+    tagBox.hidden = !(d.tags && d.tags.length);
+  }
+  function saveDocMeta(d) {
+    DB.putDoc(d);
+    renderLibrary();
+    if (currentDoc === d) renderDocMeta();
+  }
+  function toggleDone(d, x) {
+    d.dlDone = { ...(d.dlDone || {}) };
+    if (d.dlDone[x.id]) delete d.dlDone[x.id]; else d.dlDone[x.id] = true;
+    saveDocMeta(d);
+    toast(d.dlDone[x.id] ? `${x.label} als erledigt markiert.` : `${x.label} wieder offen.`);
+  }
+
+  // Frist hinzufügen / bearbeiten
+  const dlDialog = $('#dlDialog');
+  let dlEdit = null; // { doc, item|null }
+  function editDeadline(d, x) {
+    dlEdit = { doc: d, item: x || null };
+    $('#dlTitle').textContent = x ? 'Frist bearbeiten' : 'Frist hinzufügen';
+    $('#dlLabel').value = x ? x.label : '';
+    $('#dlDate').value = x ? x.date : '';
+    $('#dlTime').value = x && x.time ? x.time : '';
+    $('#dlRemove').hidden = !x;
+    $('#dlError').hidden = true;
+    dlDialog.showModal();
+  }
+  $('#dlAdd').addEventListener('click', () => { if (currentDoc) editDeadline(currentDoc, null); });
+  function saveDeadline() {
+    const { doc: d, item: x } = dlEdit || {};
+    if (!d) return;
+    const date = $('#dlDate').value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { $('#dlError').textContent = 'Bitte ein Datum wählen.'; $('#dlError').hidden = false; return; }
+    const label = $('#dlLabel').value.replace(/\s+/g, ' ').trim() || 'Frist';
+    const time = $('#dlTime').value || null;
+    const manual = (d.manualDeadlines || []).slice();
+    if (x && x.source === 'manual') manual.splice(manual.findIndex((m) => m.id === x.id), 1);
+    else if (x) d.dlHidden = { ...(d.dlHidden || {}), [x.id]: true }; // erkannte Frist durch eigene ersetzen
+    manual.push({ id: 'm-' + uid(), date, time, label, snippet: x ? x.snippet : '', approx: false, source: 'manual' });
+    d.manualDeadlines = manual;
+    dlDialog.close();
+    saveDocMeta(d);
+  }
+  $('#dlSave').addEventListener('click', saveDeadline);
+  $('#dlForm').addEventListener('submit', (e) => { e.preventDefault(); saveDeadline(); });
+  $('#dlRemove').addEventListener('click', () => {
+    const { doc: d, item: x } = dlEdit || {};
+    if (!d || !x) return;
+    if (x.source === 'manual') d.manualDeadlines = (d.manualDeadlines || []).filter((m) => m.id !== x.id);
+    else d.dlHidden = { ...(d.dlHidden || {}), [x.id]: true };
+    dlDialog.close();
+    saveDocMeta(d);
+    toast('Frist entfernt.', {
+      label: 'Rückgängig',
+      onClick: () => {
+        if (x.source === 'manual') d.manualDeadlines = (d.manualDeadlines || []).concat([{ ...x, done: undefined }]);
+        else { d.dlHidden = { ...(d.dlHidden || {}) }; delete d.dlHidden[x.id]; }
+        saveDocMeta(d);
+      },
+    });
+  });
+
+  // Kalendereintrag (.ics) mit Erinnerung
+  function icsEscape(s) { return String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
+  function icsFold(line) {
+    const out = [];
+    let cur = '', bytes = 0;
+    for (const ch of line) {
+      const b = new TextEncoder().encode(ch).length;
+      if (bytes + b > 74) { out.push(cur); cur = ' '; bytes = 1; }
+      cur += ch; bytes += b;
+    }
+    out.push(cur);
+    return out.join('\r\n');
+  }
+  function buildIcs(d, x) {
+    const ymd = x.date.replace(/-/g, '');
+    const now = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+    const summary = `${x.label === 'Termin' ? 'Termin' : x.label}: ${d.name}`;
+    const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//DokScan//DE', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'BEGIN:VEVENT',
+      `UID:${d.id}-${x.id.replace(/[^\w-]/g, '')}@dokscan`, `DTSTAMP:${now}`];
+    if (x.time) {
+      const [hh, mm] = x.time.split(':').map(Number);
+      const end = new Date(+x.date.slice(0, 4), +x.date.slice(5, 7) - 1, +x.date.slice(8, 10), hh + 1, mm);
+      const p = (n) => String(n).padStart(2, '0');
+      lines.push(`DTSTART:${ymd}T${p(hh)}${p(mm)}00`, `DTEND:${end.getFullYear()}${p(end.getMonth() + 1)}${p(end.getDate())}T${p(end.getHours())}${p(end.getMinutes())}00`);
+    } else {
+      const next = new Date(+x.date.slice(0, 4), +x.date.slice(5, 7) - 1, +x.date.slice(8, 10) + 1);
+      const p = (n) => String(n).padStart(2, '0');
+      lines.push(`DTSTART;VALUE=DATE:${ymd}`, `DTEND;VALUE=DATE:${next.getFullYear()}${p(next.getMonth() + 1)}${p(next.getDate())}`, 'TRANSP:TRANSPARENT');
+    }
+    lines.push(`SUMMARY:${icsEscape(summary)}`, `DESCRIPTION:${icsEscape((x.snippet ? `„${x.snippet}“\n\n` : '') + 'Dokument in DokScan: ' + d.name)}`,
+      'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEscape(summary)}`,
+      // Erinnerung: bei Terminen 2 Stunden vorher, bei Fristen 3 Tage vorher um 9 Uhr
+      x.time ? 'TRIGGER:-PT2H' : 'TRIGGER:-P2DT15H', 'END:VALARM', 'END:VEVENT', 'END:VCALENDAR');
+    return lines.map(icsFold).join('\r\n') + '\r\n';
+  }
+  function addToCalendar(d, x) {
+    const ics = buildIcs(d, x);
+    const name = `${x.label} ${x.date}.ics`.replace(/[\\/:*?"<>|]+/g, '-');
+    const file = new File([ics], name, { type: 'text/calendar' });
+    const url = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = url;
+    // iPad/iPhone: Safari zeigt Kalendereinträge direkt zum Hinzufügen an; sonst als Datei speichern
+    if (/iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)) a.target = '_blank';
+    else a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    toast('Kalendereintrag erstellt – mit Erinnerung vorher.');
+  }
+
+  // Schlagwörter
+  const tagDialog = $('#tagDialog');
+  let tagDoc = null;
+  function tagSuggestions(d) {
+    const out = [];
+    const L = d.letter || {};
+    if (L.sender) out.push(L.sender);
+    const k = DocName.kindBase(L.kind);
+    if (k) out.push(k);
+    if (L.date) out.push(L.date.slice(0, 4));
+    return [...new Set(out)].filter((t) => !(d.tags || []).includes(t));
+  }
+  function renderTagDialog() {
+    const d = tagDoc;
+    const all = [...new Set(allTags().concat(d.tags || []))].sort((a, b) => a.localeCompare(b, 'de'));
+    const box = $('#tagAll');
+    box.textContent = '';
+    for (const t of all) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip';
+      b.setAttribute('aria-pressed', String((d.tags || []).includes(t)));
+      b.textContent = t;
+      b.addEventListener('click', () => toggleTag(t));
+      box.appendChild(b);
+    }
+    $('#tagNone').hidden = all.length > 0;
+    const sug = tagSuggestions(d).filter((t) => !all.includes(t));
+    const sb = $('#tagSuggest');
+    sb.textContent = '';
+    for (const t of sug) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip chip-suggest';
+      b.textContent = '+ ' + t;
+      b.setAttribute('aria-label', `Schlagwort „${t}“ hinzufügen`);
+      b.addEventListener('click', () => toggleTag(t));
+      sb.appendChild(b);
+    }
+    $('#tagSuggestWrap').hidden = !sug.length;
+  }
+  function toggleTag(t) {
+    const d = tagDoc;
+    const tags = new Set(d.tags || []);
+    if (tags.has(t)) tags.delete(t); else tags.add(t);
+    d.tags = [...tags].sort((a, b) => a.localeCompare(b, 'de'));
+    saveDocMeta(d);
+    renderTagDialog();
+  }
+  function showTags(d) {
+    tagDoc = d;
+    $('#tagInput').value = '';
+    renderTagDialog();
+    tagDialog.showModal();
+  }
+  function addTagFromInput() {
+    const v = $('#tagInput').value.replace(/\s+/g, ' ').trim().slice(0, 40);
+    if (!v || !tagDoc) return;
+    if (!(tagDoc.tags || []).includes(v)) toggleTag(v);
+    $('#tagInput').value = '';
+    $('#tagInput').focus();
+  }
+  $('#tagAdd').addEventListener('click', addTagFromInput);
+  $('#tagForm').addEventListener('submit', (e) => { e.preventDefault(); addTagFromInput(); });
+  $('#tagDone').addEventListener('click', () => { addTagFromInput(); tagDialog.close(); });
+  $('#docTagsEdit').addEventListener('click', () => { if (currentDoc) showTags(currentDoc); });
 
   /** Dokument öffnen (Seiten aus dem Speicher laden) und Dokumentansicht zeigen. */
   async function openDoc(d) {
@@ -472,6 +823,7 @@
   $('#menuOpen').addEventListener('click', () => { docMenu.close(); openDoc(menuDoc); });
   $('#menuPdf').addEventListener('click', async () => { docMenu.close(); await openDoc(menuDoc); openPdf(false); });
   $('#menuRename').addEventListener('click', () => { docMenu.close(); showRename(menuDoc); });
+  $('#menuTags').addEventListener('click', () => { docMenu.close(); showTags(menuDoc); });
   $('#menuDelete').addEventListener('click', async () => { docMenu.close(); await deleteDoc(menuDoc); });
   $('#libSearch').addEventListener('input', renderLibrary);
   $('#docBack').addEventListener('click', () => closeScreen());
@@ -2707,6 +3059,7 @@
     const legacy = docs.find((d) => d.id === LEGACY_DOC);
     if (legacy && !legacy.thumb) refreshDocMeta(LEGACY_DOC);
     autoNameAll(); // ältere, noch nicht benannte Dokumente
+    for (const d of docs) if (d.metaKey === undefined && d.text && updateLetterMeta(d, null)) DB.putDoc(d);
     renderLibrary();
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
       // Neue Version aktiv → neu laden, sobald nichts offen ist (Seiten sind gespeichert)
