@@ -53,6 +53,10 @@
     <symbol id="i-move-r" viewBox="0 0 24 24"><path d="M20 4v16"/><path d="M4 12h12"/><path d="m12 8 4 4-4 4"/></symbol>
     <symbol id="i-save" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></symbol>
     <symbol id="i-restore" viewBox="0 0 24 24"><path d="M12 21V9"/><path d="m7 14 5-5 5 5"/><path d="M5 3h14"/></symbol>
+    <symbol id="i-tag" viewBox="0 0 24 24"><path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z"/><circle cx="8" cy="8" r="1.5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   </defs>
 </svg>
@@ -65,6 +69,17 @@
     </div>
     <button id="btnSettings" class="icon-btn" type="button" aria-label="Einstellungen" title="Einstellungen"><svg class="ic"><use href="#i-sliders"/></svg></button>
   </header>
+  <div id="libTools" class="lib-tools" hidden>
+    <div id="libFilter" class="chips" role="radiogroup" aria-label="Dokumente filtern"></div>
+    <label class="lib-sort"><span class="visually-hidden">Sortieren nach</span>
+      <select id="libSort" aria-label="Sortieren nach">
+        <option value="updated">Zuletzt geändert</option>
+        <option value="letter">Briefdatum</option>
+        <option value="sender">Absender</option>
+        <option value="name">Name</option>
+      </select>
+    </label>
+  </div>
   <div id="libSearchWrap" class="lib-search" hidden>
     <svg class="ic"><use href="#i-search"/></svg>
     <input id="libSearch" type="search" placeholder="Dokumente und Text durchsuchen …" autocomplete="off" aria-label="Dokumente durchsuchen">
@@ -115,6 +130,14 @@
     <button id="docDelete" class="icon-btn danger no-sel" type="button" aria-label="Dokument löschen" title="Dokument löschen"><svg class="ic"><use href="#i-trash"/></svg></button>
   </header>
   <main id="overview">
+    <section id="docMetaBar" class="doc-meta-bar no-sel" aria-label="Fristen und Schlagwörter">
+      <ul id="dlList" class="dl-list" aria-label="Fristen und Termine"></ul>
+      <div class="tag-row">
+        <div id="docTags" class="chips wrap" aria-label="Schlagwörter"></div>
+        <button id="docTagsEdit" class="pill-btn" type="button"><svg class="ic"><use href="#i-tag"/></svg><span>Schlagwörter</span></button>
+        <button id="dlAdd" class="pill-btn" type="button"><svg class="ic"><use href="#i-clock"/></svg><span>Frist</span></button>
+      </div>
+    </section>
     <p id="docEmpty" class="muted center doc-empty" hidden>Noch keine Seiten. Tippe auf <b>Scannen</b> oder <b>Importieren</b>.</p>
     <ol id="pageGrid" class="grid" aria-label="Seiten"></ol>
     <p id="gridHint" class="muted small hint" hidden>Tippe auf eine Seite zum Bearbeiten · Ziehe am Griff <svg class="ic ic-inline"><use href="#i-grip"/></svg>, um die Reihenfolge zu ändern.</p>
@@ -367,6 +390,54 @@
   </form>
 </dialog>
 
+<!-- Schlagwörter -->
+<dialog id="tagDialog" class="sheet-dialog" aria-labelledby="tagTitle">
+  <form method="dialog" class="sheet-body" id="tagForm">
+    <header class="sheet-head">
+      <h2 id="tagTitle">Schlagwörter</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="field">
+      <span>Antippen zum Zuordnen</span>
+      <div id="tagAll" class="chips wrap" aria-label="Schlagwörter"></div>
+      <p id="tagNone" class="muted small" hidden>Noch keine Schlagwörter – lege unten eins an, z. B. „Steuer 2026“, „Versicherung“ oder „Auto“.</p>
+    </div>
+    <div id="tagSuggestWrap" class="field" hidden>
+      <span>Vorschläge aus dem Brief</span>
+      <div id="tagSuggest" class="chips wrap"></div>
+    </div>
+    <label class="field">
+      <span>Neues Schlagwort</span>
+      <span class="input-suffix"><input id="tagInput" type="text" maxlength="40" autocomplete="off" enterkeyhint="done" placeholder="z. B. Steuer 2026"><button id="tagAdd" class="pw-toggle" type="button" aria-label="Schlagwort hinzufügen"><svg class="ic"><use href="#i-plus"/></svg></button></span>
+    </label>
+    <button id="tagDone" class="btn primary wide" type="button"><svg class="ic"><use href="#i-check"/></svg>Fertig</button>
+  </form>
+</dialog>
+
+<!-- Frist bearbeiten -->
+<dialog id="dlDialog" class="sheet-dialog" aria-labelledby="dlTitle">
+  <form method="dialog" class="sheet-body" id="dlForm">
+    <header class="sheet-head">
+      <h2 id="dlTitle">Frist</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+    </header>
+    <label class="field">
+      <span>Art</span>
+      <span class="input-suffix"><input id="dlLabel" type="text" maxlength="40" list="dlLabels" autocomplete="off" placeholder="z. B. Zahlung"></span>
+      <datalist id="dlLabels"><option value="Zahlung"><option value="Termin"><option value="Einspruch"><option value="Widerspruch"><option value="Rückmeldung"><option value="Frist"><option value="Gültig bis"><option value="Vertragsende"><option value="Kündigung"><option value="Abbuchung"></datalist>
+    </label>
+    <div class="dl-when">
+      <label class="field"><span>Datum</span><span class="input-suffix"><input id="dlDate" type="date" required></span></label>
+      <label class="field"><span>Uhrzeit (optional)</span><span class="input-suffix"><input id="dlTime" type="time"></span></label>
+    </div>
+    <p id="dlError" class="error small" hidden></p>
+    <div class="btn-row">
+      <button id="dlRemove" class="btn danger" type="button" hidden><svg class="ic"><use href="#i-trash"/></svg>Entfernen</button>
+      <button id="dlSave" class="btn primary" type="button"><svg class="ic"><use href="#i-check"/></svg>Speichern</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- Aktionen für ein Dokument -->
 <dialog id="docMenu" class="sheet-dialog" aria-labelledby="docMenuTitle">
   <form method="dialog" class="sheet-body">
@@ -377,6 +448,7 @@
     <button id="menuOpen" class="btn wide menu-btn" type="button"><svg class="ic"><use href="#i-eye"/></svg>Öffnen</button>
     <button id="menuPdf" class="btn wide menu-btn" type="button"><svg class="ic"><use href="#i-pdf"/></svg>PDF erstellen &amp; teilen</button>
     <button id="menuRename" class="btn wide menu-btn" type="button"><svg class="ic"><use href="#i-pencil"/></svg>Umbenennen</button>
+    <button id="menuTags" class="btn wide menu-btn" type="button"><svg class="ic"><use href="#i-tag"/></svg>Schlagwörter</button>
     <button id="menuDelete" class="btn wide menu-btn danger" type="button"><svg class="ic"><use href="#i-trash"/></svg>Löschen</button>
   </form>
 </dialog>
