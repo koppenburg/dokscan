@@ -1,6 +1,6 @@
 'use strict';
 // Offline-Cache für die App-Dateien (stale-while-revalidate).
-const CACHE = 'dokscan-v18';
+const CACHE = 'dokscan-v19';
 // Fremdbibliotheken (Texterkennung, PDF-Import) in einem eigenen Cache, der Updates der App übersteht.
 // Nur hochzählen, wenn sich Dateien in vendor/ ändern.
 const VENDOR = 'dokscan-vendor-1';
@@ -21,7 +21,7 @@ function vendorFiles() {
   return [
     'vendor/tesseract/tesseract.min.js', 'vendor/tesseract/worker.min.js', 'vendor/tesseract/lang/deu.traineddata.gz',
     simd ? 'vendor/tesseract/tesseract-core-simd-lstm.wasm.js' : 'vendor/tesseract/tesseract-core-lstm.wasm.js',
-    'vendor/pdfjs/pdf.min.js', 'vendor/pdfjs/pdf.worker.min.js',
+    'vendor/pdfjs/pdf.min.js', 'vendor/pdfjs/pdf.worker.min.js', 'vendor/qrcode/qrcode.js',
     ...FONTS.map((f) => 'vendor/pdfjs/standard_fonts/' + f),
   ];
 }

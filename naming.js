@@ -356,6 +356,114 @@ const DocName = (() => {
     return { date: best ? iso(best.date) : null, sender: sender || null, kind: kind || null };
   }
 
+  // ---------- Überweisung ----------
+  // Länge der Kontonummer (BBAN) nach dem Ländercode und den 2 Prüfziffern; bei * nur Ziffern
+  const IBAN_LEN = { DE: [18, true], AT: [16, true], CH: [17, false], LI: [17, false], LU: [16, false], NL: [14, false], BE: [12, true], FR: [23, false], IT: [23, false], ES: [20, true], PL: [24, true], DK: [14, true], CZ: [20, true], SK: [20, true] };
+  function ibanValid(iban) {
+    const r = iban.slice(4) + iban.slice(0, 4);
+    let mod = 0;
+    for (const ch of r) {
+      const v = /\d/.test(ch) ? ch : String(ch.charCodeAt(0) - 55);
+      for (const d of v) mod = (mod * 10 + +d) % 97;
+    }
+    return mod === 1;
+  }
+  const OCR_DIGIT = { O: '0', o: '0', D: '0', Q: '0', I: '1', l: '1', '|': '1', i: '1', L: '1', S: '5', s: '5', B: '8', Z: '2', z: '2', G: '6', b: '6', T: '7' };
+  /** IBANs im Text (mit Prüfziffer geprüft; typische OCR-Verwechslungen O→0, I→1 … werden korrigiert). */
+  function findIbans(t) {
+    const out = [];
+    const re = /\b([A-Z]{2})\s?([0-9OIlSBZ]{2})[\s]?((?:[A-Za-z0-9|][\s]?){10,34})/g;
+    for (let m; (m = re.exec(t));) {
+      const cc = m[1], spec = IBAN_LEN[cc];
+      if (!spec) continue;
+      const [len, digits] = spec;
+      const raw = m[3].replace(/\s/g, '');
+      if (raw.length < len) continue;
+      let bban = raw.slice(0, len);
+      const fix = (x) => x.split('').map((c) => (/\d/.test(c) ? c : OCR_DIGIT[c] || c)).join('');
+      if (digits) bban = fix(bban);
+      const iban = cc + fix(m[2]) + bban.toUpperCase();
+      if (!/^[A-Z]{2}\d{2}[A-Z0-9]+$/.test(iban) || !ibanValid(iban)) continue;
+      // nach der Kontonummer darf keine weitere Ziffer folgen (sonst zu kurz gegriffen)
+      out.push({ iban, pos: m.index });
+      re.lastIndex = m.index + 4;
+    }
+    return out;
+  }
+  const fmtIban = (iban) => iban.replace(/(.{4})/g, '$1 ').trim();
+  function parseAmount(intPart, cents) { return +(intPart.replace(/[.\s']/g, '') + '.' + cents); }
+
+  /**
+   * Überweisungsdaten einer Rechnung/Mahnung/eines Bescheids: IBAN, BIC, Empfänger, Betrag, Verwendungszweck.
+   * directDebit = der Betrag wird abgebucht (keine Überweisung nötig). null, wenn nichts Brauchbares gefunden.
+   */
+  function payment(text, opts = {}) {
+    if (!text || text.length < 20) return null;
+    const t = text.slice(0, 20000).replace(/[ \t]+/g, ' ');
+    const flat = t.replace(/\s+/g, ' ');
+    const lt = lower(flat);
+    const debit = /(wird|werden).{0,110}?(abgebucht|eingezogen)|per lastschrift|sepa-lastschrift(?!mandat)|lastschriftverfahren|bankeinzug/.test(lt)
+      && !/(bitte|überweisen sie|zu überweisen|zahlen sie)[^.]{0,80}(überweis|auf (das|unser) konto)/.test(lt);
+    // IBAN: bevorzugt mit „IBAN“/„Bankverbindung“ davor, nicht die des Empfängers („Ihre IBAN“)
+    let iban = null, best = -Infinity;
+    for (const c of findIbans(flat)) {
+      const before = lt.slice(Math.max(0, c.pos - 60), c.pos);
+      let s = 0;
+      if (/iban\s*:?\s*$/.test(before)) s += 3;
+      if (/bankverbindung|konto|überweis|zahlbar|kreditinstitut|bank\b|sparkasse|volksbank/.test(before)) s += 2;
+      if (/\b(ihre?|ihr konto|ihrem konto|mandat|abgebucht|zahlungspflichtige)\b/.test(before)) s -= 4;
+      if (/\*{2,}|x{3,}/i.test(flat.slice(c.pos, c.pos + 30))) s -= 5;
+      if (s > best) { best = s; iban = c.iban; }
+    }
+    if (iban && best < -2) iban = null;
+    const bicM = flat.match(/\b(?:BIC|SWIFT)(?:-Code)?\s*:?\s*([A-Z]{4}\s?[A-Z]{2}\s?[A-Z0-9]{2}(?:\s?[A-Z0-9]{3})?)\b/);
+    const bic = bicM ? bicM[1].replace(/\s/g, '') : null;
+    // Betrag
+    let amount = null, bestA = -Infinity;
+    const money = /(?:(?:€|EUR)\s?(\d{1,3}(?:[.\s']\d{3})*|\d+),(\d{2})(?!\d))|(?:(?<![\d,.])(\d{1,3}(?:[.\s']\d{3})*|\d+),(\d{2})\s?(?:€|EUR\b|Euro\b))/g;
+    const amounts = [];
+    for (let m; (m = money.exec(flat));) {
+      const v = m[1] ? parseAmount(m[1], m[2]) : parseAmount(m[3], m[4]);
+      if (!(v > 0) || v > 1e7) continue;
+      const before = lt.slice(Math.max(0, m.index - 70), m.index);
+      let s = 0;
+      if (/(zu zahlen|zahlbetrag|rechnungsbetrag|gesamtbetrag|endbetrag|offene[nr]? betrag|noch offen|nachzahlung|zahlbar|betrag von|bruttobetrag|summe brutto|gesamt brutto|gesamtsumme|forderung|fälliger betrag|ausstehend|zahlen sie|überweisen sie)[^0-9]{0,40}$/.test(before)) s += 5;
+      else if (/(gesamt|summe|total|betrag)[^0-9]{0,25}$/.test(before)) s += 2;
+      if (/(netto|mwst|ust\.?|umsatzsteuer|mehrwertsteuer|zzgl|einzelpreis|rabatt|skonto|guthaben|erstattung|abschlag gezahlt|bereits gezahlt|zahlungen)[^0-9]{0,30}$/.test(before)) s -= 4;
+      amounts.push({ v, s, pos: m.index });
+      if (s > bestA || (s === bestA && v > amount)) { bestA = s; amount = v; }
+    }
+    if (bestA <= 0) amount = amounts.length === 1 ? amounts[0].v : null;
+    // Empfänger
+    const recM = t.match(/(?:zahlungs)?empfänger(?:in)?\s*:?\s*([^\n,;]{3,70})/i) || t.match(/kontoinhaber(?:in)?\s*:?\s*([^\n,;]{3,70})/i);
+    const recipient = (recM ? clean(recM[1]) : opts.sender || '').replace(/\s*(IBAN|BIC)\b.*$/i, '').slice(0, 70) || null;
+    // Verwendungszweck
+    let reference = null;
+    const vz = t.match(/verwendungszweck\s*:?\s*([^\n]{3,140})/i);
+    if (vz && !/^\s*(bitte|angeben|unbedingt)/i.test(vz[1])) reference = clean(vz[1]).replace(/^["„“]|["„“]$/g, '');
+    if (!reference) {
+      const parts = [];
+      const grab = (re, label) => { const m = flat.match(re); if (m && !parts.some((p) => p.includes(m[1]))) parts.push(`${label} ${m[1]}`); };
+      grab(/kassenzeichen\s*:?\s*([A-Z0-9][A-Z0-9.\-\/ ]{3,30}[A-Z0-9])/i, 'Kassenzeichen');
+      grab(/rechnungs?\s?-?\s?(?:nummer|nr\.?)\s*:?\s*([A-Z0-9][A-Z0-9.\-\/]{2,30})/i, 'Rechnung');
+      if (!parts.length) grab(/\brechnung\s+nr\.?\s*:?\s*([A-Z0-9][A-Z0-9.\-\/]{2,30})/i, 'Rechnung');
+      grab(/kunden\s?-?\s?(?:nummer|nr\.?)\s*:?\s*([A-Z0-9][A-Z0-9.\-\/]{2,30})/i, 'Kunde');
+      grab(/vertrags\s?-?\s?(?:nummer|nr\.?|konto)\s*:?\s*([A-Z0-9][A-Z0-9.\-\/]{2,30})/i, 'Vertrag');
+      grab(/steuer\s?-?\s?(?:nummer|nr\.?)\s*:?\s*(\d{2,3}\s?\/\s?\d{3,4}\s?\/\s?\d{4,5})/i, 'StNr');
+      grab(/aktenzeichen\s*:?\s*([A-Z0-9][A-Z0-9.\-\/ ]{2,30}[A-Z0-9])/i, 'Az');
+      reference = parts.join(', ').slice(0, 140) || null;
+    }
+    if (!iban && !debit) return null;
+    return { iban, ibanFormatted: iban ? fmtIban(iban) : null, bic, recipient, amount, reference, directDebit: !iban && debit };
+  }
+
+  /** Inhalt eines GiroCodes (EPC-QR, Version 002) für Banking-Apps. */
+  function giroCode(p) {
+    const amt = p.amount ? 'EUR' + p.amount.toFixed(2) : '';
+    const cut = (s, n) => String(s || '').replace(/[\r\n]+/g, ' ').slice(0, n);
+    return ['BCD', '002', '1', 'SCT', cut(p.bic, 11), cut(p.recipient, 70), p.iban, amt, '', '', cut(p.reference, 140)].join('\n');
+  }
+
   /** Grundform der Dokumentart für Schlagwörter: „Stromrechnung“ → „Rechnung“, „Einkommensteuerbescheid“ → „Bescheid“. */
   function kindBase(kind) {
     if (!kind) return null;
@@ -369,6 +477,6 @@ const DocName = (() => {
   /** Allgemeine Dateinamen (z. B. „Scan_0001“, „IMG_1234“, „Dokument (2)“), die ersetzt werden dürfen. */
   const isGenericName = (n) => /^(?:scan(?:ned)?|scanner|img|image|bild|foto|photo|dsc|doc|dok|document|dokument|datei|file|unbenannt|untitled|neu|new|pdf|print|druck|cam|kopie|copy)?[\s_\-().\d]*$/i.test((n || '').replace(/\.pdf$/i, '').trim());
 
-  return { suggest, letterInfo, deadlines, kindBase, isGenericName, _internals: { findDates, findKind, findSender } };
+  return { suggest, letterInfo, deadlines, kindBase, payment, giroCode, ibanValid, isGenericName, _internals: { findDates, findKind, findSender } };
 })();
 if (typeof module !== 'undefined') module.exports = DocName;
