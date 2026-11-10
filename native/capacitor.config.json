@@ -1,0 +1,15 @@
+{
+  "appId": "info.koppenburg.dokscan",
+  "appName": "DokScan",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#f4f5f7",
+    "limitsNavigationsToAppBoundDomains": false
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "iconColor": "#1f5fd6"
+    }
+  }
+}

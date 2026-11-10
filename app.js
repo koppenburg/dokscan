@@ -10,9 +10,38 @@
     ['bw', 'S/W'],
   ];
 
+  // ---------- Als iOS-App (Capacitor)? ----------
+  const NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
+  const plugin = (name) => {
+    if (!NATIVE) return null;
+    const C = window.Capacitor;
+    return (C.Plugins && C.Plugins[name]) || (typeof C.registerPlugin === 'function' ? C.registerPlugin(name) : null);
+  };
+  if (NATIVE) document.documentElement.classList.add('native');
+  const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+  /** Dateien über das iOS-Teilen-Menü weitergeben (Mail, Nachrichten, „In Dateien sichern“ …). */
+  async function nativeShare(files, title) {
+    const FS = plugin('Filesystem'), SH = plugin('Share');
+    if (!FS || !SH) throw new Error('Teilen ist in dieser App-Version nicht verfügbar.');
+    const uris = [];
+    const stamp = Date.now();
+    for (const f of files) {
+      const name = (f.name || 'Datei').replace(/[\\/:*?"<>|]+/g, '_');
+      const r = await FS.writeFile({ path: `teilen/${stamp}/${name}`, data: await blobToBase64(f), directory: 'CACHE', recursive: true });
+      uris.push(r.uri);
+    }
+    try { await SH.share({ title: title || (files[0] && files[0].name) || 'DokScan', files: uris }); }
+    catch (e) { if (!/cancel/i.test((e && (e.message || e.code)) || '')) throw e; }
+  }
+
   // ---------- Einstellungen ----------
   const IS_IPAD = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true, blurWarn: true, orient: 'auto', margin: 0, maxSize: 0, autoName: true, libSort: 'updated', libFilter: 'all', reviewScan: true };
+  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true, blurWarn: true, orient: 'auto', margin: 0, maxSize: 0, autoName: true, libSort: 'updated', libFilter: 'all', reviewScan: true, reminders: true };
   const settings = (() => {
     try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('dokscan.settings') || '{}') }; }
     catch { return { ...DEFAULTS }; }
@@ -251,7 +280,7 @@
     d.thumb = (list[0] && list[0].thumb) || null;
     d.text = text;
     applyAutoName(d, list[0]);
-    updateLetterMeta(d, list[0]);
+    if (updateLetterMeta(d, list[0])) scheduleReminders();
     if (docs.includes(d)) DB.putDoc(d);
     renderLibrary();
     if (currentDoc === d) renderDocHeader();
@@ -664,7 +693,8 @@
       $('#sendProgress').hidden = true;
       $('#sendGo').hidden = true;
       $('#sendResult').hidden = false;
-      $('#sendShare').hidden = !(navigator.canShare && navigator.canShare({ files }));
+      $('#sendShare').hidden = !NATIVE && !(navigator.canShare && navigator.canShare({ files }));
+      $('#sendSave').hidden = NATIVE; // in der App: „Teilen“ enthält „In Dateien sichern“
     } catch (e) {
       console.error(e);
       $('#sendProgress').hidden = true;
@@ -676,8 +706,9 @@
   $('#sendShare').addEventListener('click', async () => {
     const files = send.files;
     if (!files) return;
-    try { await navigator.share({ files, title: files.length === 1 ? files[0].name : `${files.length} Dokumente` }); }
-    catch (e) { if (e && e.name !== 'AbortError') toast('Teilen nicht möglich – nutze „Speichern“.'); }
+    const title = files.length === 1 ? files[0].name : `${files.length} Dokumente`;
+    try { if (NATIVE) await nativeShare(files, title); else await navigator.share({ files, title }); }
+    catch (e) { if (e && e.name !== 'AbortError') toast(NATIVE ? `Teilen nicht möglich: ${e.message || e}` : 'Teilen nicht möglich – nutze „Speichern“.'); }
   });
   $('#sendSave').addEventListener('click', async () => {
     const files = send.files;
@@ -880,7 +911,58 @@
   $('#paySave').addEventListener('click', savePayment);
   $('#payForm').addEventListener('submit', (e) => { e.preventDefault(); savePayment(); });
 
+  // ---------- Erinnerungen an Fristen (nur in der App: echte Mitteilungen) ----------
+  let reminderTimer = null, reminderAsked = false;
+  const scheduleReminders = () => { if (!NATIVE) return; clearTimeout(reminderTimer); reminderTimer = setTimeout(syncReminders, 1500); };
+  const hashId = (str) => { let h = 2166136261; for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619); return (h >>> 1) % 2000000000 + 1; };
+  async function syncReminders() {
+    const LN = plugin('LocalNotifications');
+    if (!LN) return;
+    try {
+      const pend = await LN.getPending();
+      const ours = ((pend && pend.notifications) || []).filter((n) => n.extra && n.extra.dokscan);
+      if (ours.length) await LN.cancel({ notifications: ours.map((n) => ({ id: n.id })) });
+      if (!settings.reminders) return;
+      const now = Date.now();
+      const list = [];
+      for (const d of docs) {
+        for (const x of docDeadlines(d)) {
+          if (x.done) continue;
+          const [y, m, dd] = x.date.split('-').map(Number);
+          const what = `${dlPhrase(x)} ${fmtDay(x.date)}${x.time ? ', ' + x.time + ' Uhr' : ''}`;
+          const add = (at, title) => { if (at.getTime() > now + 60000) list.push({ id: hashId(`${d.id}|${x.id}|${title}`), title, body: `${what} – ${d.name}`, schedule: { at, allowWhileIdle: true }, extra: { dokscan: true, docId: d.id } }); };
+          if (x.time) {
+            const [hh, mi] = x.time.split(':').map(Number);
+            add(new Date(y, m - 1, dd, hh - 2, mi), `${x.label} in 2 Stunden`);
+            add(new Date(y, m - 1, dd - 1, 18, 0), `${x.label} morgen`);
+          } else {
+            add(new Date(y, m - 1, dd - 2, 9, 0), `${x.label} in 2 Tagen fällig`);
+            add(new Date(y, m - 1, dd, 8, 0), `${x.label} heute fällig`);
+          }
+        }
+      }
+      if (!list.length) return;
+      list.sort((a, b) => a.schedule.at - b.schedule.at);
+      let perm = await LN.checkPermissions();
+      if (perm.display !== 'granted' && !reminderAsked) { reminderAsked = true; perm = await LN.requestPermissions(); }
+      if (perm.display !== 'granted') return;
+      await LN.schedule({ notifications: list.slice(0, 60) }); // iOS erlaubt höchstens 64 geplante Mitteilungen
+    } catch (e) { console.warn('Erinnerungen', e); }
+  }
+  if (NATIVE) {
+    const LN = plugin('LocalNotifications');
+    if (LN && LN.addListener) {
+      // Antippen einer Erinnerung öffnet das Dokument
+      LN.addListener('localNotificationActionPerformed', (ev) => {
+        const id = ev && ev.notification && ev.notification.extra && ev.notification.extra.docId;
+        const d = id && docs.find((x) => x.id === id);
+        if (d) setTimeout(() => openDoc(d), 300);
+      });
+    }
+  }
+
   function saveDocMeta(d) {
+    scheduleReminders();
     DB.putDoc(d);
     renderLibrary();
     if (currentDoc === d) renderDocMeta();
@@ -979,6 +1061,10 @@
     const ics = buildIcs(d, x);
     const name = `${x.label} ${x.date}.ics`.replace(/[\\/:*?"<>|]+/g, '-');
     const file = new File([ics], name, { type: 'text/calendar' });
+    if (NATIVE) {
+      nativeShare([file], name).catch((e) => toast(`Kalendereintrag nicht möglich: ${e.message || e}`));
+      return;
+    }
     const url = URL.createObjectURL(file);
     const a = document.createElement('a');
     a.href = url;
@@ -1088,6 +1174,7 @@
   async function deleteDoc(d, ask = true) {
     const n = d.pageCount;
     if (ask && !confirm(`„${d.name}“${n ? ` mit ${n === 1 ? '1 Seite' : `${n} Seiten`}` : ''} löschen?`)) return false;
+    scheduleReminders();
     docs = docs.filter((x) => x !== d);
     clearTimeout(docTimers.get(d.id)); docTimers.delete(d.id);
     for (const p of inflight.values()) if (p.docId === d.id) p.deleted = true;
@@ -3205,7 +3292,9 @@
         (pdfState.ocr ? (blob.ocrFailed ? ' · ohne Texterkennung (nicht verfügbar)' : ' · durchsuchbar') : '') +
         (settings.maxSize ? (blob.fitsTarget ? ` · unter ${settings.maxSize} MB` : ` · ${settings.maxSize} MB nicht erreichbar`) : '') +
         (password ? ' · passwortgeschützt' : '');
-      $('#pdfShare').hidden = !canShareFile(blob);
+      $('#pdfShare').hidden = !NATIVE && !canShareFile(blob);
+      $('#pdfDownload').hidden = NATIVE; // in der App: „Teilen“ enthält „In Dateien sichern“
+      $('#pdfOpen').hidden = NATIVE;
       $('#pdfResult').hidden = false;
       $('#pdfGenerate').hidden = true;
       // Ergebnis mit „Teilen/Speichern“ sichtbar machen
@@ -3262,8 +3351,8 @@
   $('#pdfShare').addEventListener('click', async () => {
     const f = pdfFile(pdfState.blob);
     if (!f) return;
-    try { await navigator.share({ files: [f], title: f.name }); }
-    catch (e) { if (e && e.name !== 'AbortError') toast('Teilen nicht möglich – nutze „Speichern“.'); }
+    try { if (NATIVE) await nativeShare([f], f.name); else await navigator.share({ files: [f], title: f.name }); }
+    catch (e) { if (e && e.name !== 'AbortError') toast(NATIVE ? `Teilen nicht möglich: ${e.message || e}` : 'Teilen nicht möglich – nutze „Speichern“.'); }
   });
   $('#pdfDownload').addEventListener('click', () => {
     if (!pdfState.url) return;
@@ -3294,6 +3383,7 @@
     $('#setBlurWarn').checked = settings.blurWarn;
     $('#setAutoName').checked = settings.autoName;
     $('#setReview').checked = settings.reviewScan;
+    $('#setReminders').checked = settings.reminders;
     syncSettingDeps();
     refreshStorageInfo();
     setDialog.showModal();
@@ -3307,6 +3397,7 @@
   $('#setAutoPdf').addEventListener('change', (e) => { settings.autoPdf = e.target.checked; saveSettings(); });
   $('#setWideFov').addEventListener('change', (e) => { settings.wideFov = e.target.checked; saveSettings(); });
   $('#setReview').addEventListener('change', (e) => { settings.reviewScan = e.target.checked; saveSettings(); });
+  $('#setReminders').addEventListener('change', (e) => { settings.reminders = e.target.checked; saveSettings(); reminderAsked = false; scheduleReminders(); });
   $('#setAutoName').addEventListener('change', (e) => {
     settings.autoName = e.target.checked;
     saveSettings();
@@ -3326,6 +3417,10 @@
   const isoDay = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
   /** Datei teilen (iOS: „In Dateien sichern“) oder herunterladen. */
   async function shareOrDownload(file) {
+    if (NATIVE) {
+      try { await nativeShare([file], file.name); return true; }
+      catch (e) { toast(`Teilen nicht möglich: ${e.message || e}`); return false; }
+    }
     try {
       if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: file.name }); return true; }
     } catch (e) {
@@ -3340,7 +3435,7 @@
   }
   async function refreshStorageInfo() {
     const el = $('#storageInfo');
-    const parts = ['Alle Dokumente werden nur auf diesem Gerät gespeichert.'];
+    const parts = [NATIVE ? 'Alle Dokumente werden in der App auf diesem Gerät gespeichert (im iCloud-Backup des Geräts enthalten).' : 'Alle Dokumente werden nur auf diesem Gerät gespeichert.'];
     try {
       if (navigator.storage && navigator.storage.estimate) {
         const { usage, quota } = await navigator.storage.estimate();
@@ -3417,7 +3512,7 @@
     try { closed = localStorage.getItem('dokscan.homeHint') === 'closed'; } catch { /* egal */ }
     const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
     const standalone = navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
-    $('#homeHint').hidden = closed || !ios || standalone || docs.length === 0;
+    $('#homeHint').hidden = NATIVE || closed || !ios || standalone || docs.length === 0;
   }
   $('#homeHintClose').addEventListener('click', () => {
     try { localStorage.setItem('dokscan.homeHint', 'closed'); } catch { /* egal */ }
@@ -3490,6 +3585,7 @@
     if (legacy && !legacy.thumb) refreshDocMeta(LEGACY_DOC);
     autoNameAll(); // ältere, noch nicht benannte Dokumente
     for (const d of docs) if (d.metaKey === undefined && d.text && updateLetterMeta(d, null)) DB.putDoc(d);
+    scheduleReminders();
     for (const d of docs) if (d.payment === undefined && d.text) { try { d.payment = DocName.payment(d.text, { sender: d.letter && d.letter.sender }); } catch { d.payment = null; } DB.putDoc(d); }
     renderLibrary();
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
