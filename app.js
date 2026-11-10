@@ -139,6 +139,7 @@
   // ---------- Zustand ----------
   /** @type {Array<any>} */
   let pages = [];
+  const currentPages = () => pages;
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
   const record = (p) => ({
@@ -455,7 +456,15 @@
       more.className = 'icon-btn doc-more';
       more.setAttribute('aria-label', `Aktionen für ${d.name}`);
       more.innerHTML = '<svg class="ic"><use href="#i-dots"/></svg>';
-      li.append(open, more);
+      if (libSel.on) {
+        const ck = document.createElement('span');
+        ck.className = 'card-check doc-check';
+        ck.innerHTML = '<svg class="ic"><use href="#i-check"/></svg>';
+        li.append(open, ck);
+        li.classList.toggle('selected', libSel.ids.has(d.id));
+        open.setAttribute('aria-pressed', String(libSel.ids.has(d.id)));
+        open.setAttribute('aria-label', `${d.name} – auswählen`);
+      } else li.append(open, more);
       docList.appendChild(li);
     }
     for (const [id, t] of libThumbs) if (!docs.some((d) => d.id === id)) { URL.revokeObjectURL(t.url); libThumbs.delete(id); }
@@ -466,8 +475,171 @@
     $('#libNoHits').hidden = !(n && !shown);
     $('#libNoHits').textContent = q ? 'Keine Treffer.' : 'Keine Dokumente in dieser Auswahl.';
     $('#libInfo').textContent = n === 0 ? 'Keine Dokumente' : n === 1 ? '1 Dokument' : `${n} Dokumente`;
+    $('#libSelect').hidden = n === 0;
     updateHomeHint();
+    if (libSel.on) renderLibSelection(true);
   }
+
+  // ---------- Mehrere Dokumente auswählen (z. B. gemeinsam per E-Mail senden) ----------
+  const libSel = { on: false, ids: new Set() };
+  /** Sichtbare (gefilterte) Dokumente in Anzeigereihenfolge */
+  const visibleDocIds = () => [...docList.querySelectorAll('.doc-item')].map((li) => li.dataset.id);
+  function setLibSelecting(on) {
+    libSel.on = on && docs.length > 0;
+    libSel.ids.clear();
+    $('#app').classList.toggle('selecting', libSel.on);
+    renderLibrary();
+  }
+  function renderLibSelection(fromRender) {
+    for (const id of [...libSel.ids]) if (!docs.some((d) => d.id === id)) libSel.ids.delete(id);
+    if (!fromRender) {
+      for (const li of docList.querySelectorAll('.doc-item')) {
+        const on = libSel.ids.has(li.dataset.id);
+        li.classList.toggle('selected', on);
+        const b = li.querySelector('.doc-open');
+        if (b) b.setAttribute('aria-pressed', String(on));
+      }
+    }
+    const n = libSel.ids.size, vis = visibleDocIds();
+    $('#libSelCount').textContent = n === 0 ? 'Dokumente auswählen' : n === 1 ? '1 Dokument ausgewählt' : `${n} Dokumente ausgewählt`;
+    $('#libSelAll').textContent = vis.length && vis.every((id) => libSel.ids.has(id)) ? 'Keine' : 'Alle';
+    $('#libSend').disabled = n === 0;
+    $('#libSelDelete').disabled = n === 0;
+  }
+  $('#libSelect').addEventListener('click', () => setLibSelecting(true));
+  $('#libSelDone').addEventListener('click', () => setLibSelecting(false));
+  $('#libSelAll').addEventListener('click', () => {
+    const vis = visibleDocIds();
+    if (vis.every((id) => libSel.ids.has(id))) vis.forEach((id) => libSel.ids.delete(id));
+    else vis.forEach((id) => libSel.ids.add(id));
+    renderLibSelection();
+  });
+  const selectedDocs = () => visibleDocIds().filter((id) => libSel.ids.has(id)).map((id) => docs.find((d) => d.id === id)).filter(Boolean);
+  $('#libSelDelete').addEventListener('click', async () => {
+    const list = selectedDocs();
+    if (!list.length) return;
+    const pagesN = list.reduce((a, d) => a + (d.pageCount || 0), 0);
+    if (!confirm(`${list.length === 1 ? '1 Dokument' : `${list.length} Dokumente`} mit zusammen ${pagesN === 1 ? '1 Seite' : `${pagesN} Seiten`} löschen?`)) return;
+    for (const d of list) await deleteDoc(d, false);
+    setLibSelecting(false);
+    toast(list.length === 1 ? '1 Dokument gelöscht.' : `${list.length} Dokumente gelöscht.`);
+  });
+
+  // Senden: einzelne PDFs oder ein gemeinsames PDF, dann teilen (Mail, Nachrichten …) oder speichern
+  const sendDialog = $('#sendDialog');
+  const send = { docs: [], files: null, busy: false };
+  const safeName = (n) => (n || 'Dokument').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 120) || 'Dokument';
+  function sendMode() { return (sendDialog.querySelector('input[name="sendmode"]:checked') || {}).value || 'each'; }
+  function resetSendResult() {
+    send.files = null;
+    $('#sendResult').hidden = true;
+    $('#sendError').hidden = true;
+    $('#sendProgress').hidden = true;
+    $('#sendGo').hidden = false;
+    $('#sendGo').disabled = false;
+  }
+  $('#libSend').addEventListener('click', () => {
+    const list = selectedDocs();
+    if (!list.length) return;
+    send.docs = list;
+    const ul = $('#sendList');
+    ul.textContent = '';
+    for (const d of list) {
+      const li = document.createElement('li');
+      const b = document.createElement('b'); b.textContent = d.name;
+      const m = document.createElement('span'); m.className = 'muted small'; m.textContent = d.pageCount === 1 ? ' · 1 Seite' : ` · ${d.pageCount} Seiten`;
+      li.append(b, m);
+      ul.appendChild(li);
+    }
+    $('#sendTitle').textContent = list.length === 1 ? 'Dokument senden' : `${list.length} Dokumente senden`;
+    $('#sendEachLabel').textContent = list.length === 1 ? 'PDF' : `${list.length} PDFs`;
+    sendDialog.querySelector('input[name="sendmode"][value="each"]').checked = true;
+    sendDialog.querySelector('input[name="sendmode"][value="one"]').closest('label').hidden = list.length < 2;
+    const fmt = { a4: 'A4', a5: 'A5', letter: 'US Letter', image: 'wie Foto' }[settings.format] || 'A4';
+    const ql = { high: 'beste', medium: 'mittlere', low: 'kleine' }[settings.quality] || 'mittlere';
+    $('#sendHint').textContent = `Mit den PDF-Einstellungen: ${fmt}, ${ql} Qualität${settings.maxSize ? `, max. ${settings.maxSize} MB je PDF` : ''}${settings.ocr ? ', durchsuchbar' : ''}.`;
+    resetSendResult();
+    sendDialog.showModal();
+  });
+  sendDialog.addEventListener('change', (e) => { if (e.target.name === 'sendmode') resetSendResult(); });
+  /** Seiten eines Dokuments für die PDF-Erstellung (aus dem Speicher; fehlende Bilder werden berechnet). */
+  async function pagesForPdf(d) {
+    let list = currentDoc === d ? pages.slice() : ((await DB.pagesOf(d.id)) || []).sort((a, b) => a.order - b.order).map((r) => inflight.get(r.id) || { ...r });
+    list = list.filter((p) => !p.deleted);
+    for (const p of list) {
+      if (p.pending || !p.processed) {
+        if (inflight.has(p.id)) { await whenIdle(); continue; }
+        Object.assign(p, await processPage(p), { procKey: p.procKey || uid() });
+        persist(p);
+      }
+    }
+    return list.filter((p) => p.processed);
+  }
+  $('#sendGo').addEventListener('click', async () => {
+    if (send.busy || !send.docs.length) return;
+    send.busy = true;
+    resetSendResult();
+    $('#sendGo').disabled = true;
+    $('#sendProgress').hidden = false;
+    const bar = $('#sendProgressBar'), text = $('#sendProgressText');
+    const mode = sendMode();
+    const opts = { format: settings.format, orient: settings.orient, margin: settings.margin, quality: settings.quality, maxBytes: settings.maxSize * 1024 * 1024, ocr: settings.ocr };
+    try {
+      const files = [];
+      const docsList = send.docs;
+      const groups = mode === 'one' ? [docsList] : docsList.map((d) => [d]);
+      for (let g = 0; g < groups.length; g++) {
+        const group = groups[g];
+        let list = [];
+        for (const d of group) {
+          text.textContent = `Seiten von „${d.name}“ werden geladen …`;
+          list = list.concat(await pagesForPdf(d));
+        }
+        if (!list.length) continue;
+        const title = group.length === 1 ? group[0].name : `Unterlagen ${isoDay(Date.now())} (${group.length} Dokumente)`;
+        const blob = await buildPdf({ ...opts, pages: list, title }, (i, n, ocr) => {
+          const part = groups.length > 1 ? `PDF ${g + 1} von ${groups.length}: ` : '';
+          text.textContent = part + (ocr && ocr.text ? `${ocr.text} (Seite ${i + 1} von ${n})` : `Seite ${Math.min(i + 1, n)} von ${n}`);
+          bar.style.width = `${Math.round(((g + (n ? i / n : 1)) / groups.length) * 100)}%`;
+        });
+        files.push(new File([blob], safeName(title) + '.pdf', { type: 'application/pdf' }));
+      }
+      if (!files.length) throw new Error('Keine Seiten zum Senden.');
+      send.files = files;
+      const total = files.reduce((a, f) => a + f.size, 0);
+      $('#sendResMeta').textContent = `${files.length === 1 ? '1 PDF' : `${files.length} PDFs`} · zusammen ${fmtSize(total)}`
+        + (total > 20 * 1048576 ? ' – für E-Mail evtl. zu groß; in den PDF-Einstellungen lässt sich eine maximale Dateigröße wählen.' : '');
+      $('#sendProgress').hidden = true;
+      $('#sendGo').hidden = true;
+      $('#sendResult').hidden = false;
+      $('#sendShare').hidden = !(navigator.canShare && navigator.canShare({ files }));
+    } catch (e) {
+      console.error(e);
+      $('#sendProgress').hidden = true;
+      $('#sendError').textContent = e.message || 'PDFs konnten nicht erstellt werden.';
+      $('#sendError').hidden = false;
+      $('#sendGo').disabled = false;
+    } finally { send.busy = false; }
+  });
+  $('#sendShare').addEventListener('click', async () => {
+    const files = send.files;
+    if (!files) return;
+    try { await navigator.share({ files, title: files.length === 1 ? files[0].name : `${files.length} Dokumente` }); }
+    catch (e) { if (e && e.name !== 'AbortError') toast('Teilen nicht möglich – nutze „Speichern“.'); }
+  });
+  $('#sendSave').addEventListener('click', async () => {
+    const files = send.files;
+    if (!files) return;
+    for (const f of files) {
+      const url = URL.createObjectURL(f);
+      const a = document.createElement('a');
+      a.href = url; a.download = f.name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      await new Promise((r) => setTimeout(r, 400)); // Browser lassen mehrere Downloads nur nacheinander zu
+    }
+  });
+  sendDialog.addEventListener('close', () => { if (!send.busy) send.files = null; });
   $('#libSort').addEventListener('change', (e) => { settings.libSort = e.target.value; saveSettings(); renderLibrary(); });
 
   function renderDocHeader() {
@@ -861,9 +1033,9 @@
     renderLibrary();
   }
 
-  async function deleteDoc(d) {
+  async function deleteDoc(d, ask = true) {
     const n = d.pageCount;
-    if (!confirm(`„${d.name}“${n ? ` mit ${n === 1 ? '1 Seite' : `${n} Seiten`}` : ''} löschen?`)) return false;
+    if (ask && !confirm(`„${d.name}“${n ? ` mit ${n === 1 ? '1 Seite' : `${n} Seiten`}` : ''} löschen?`)) return false;
     docs = docs.filter((x) => x !== d);
     clearTimeout(docTimers.get(d.id)); docTimers.delete(d.id);
     for (const p of inflight.values()) if (p.docId === d.id) p.deleted = true;
@@ -945,6 +1117,11 @@
     if (!li) return;
     const d = docs.find((x) => x.id === li.dataset.id);
     if (!d) return;
+    if (libSel.on) {
+      if (libSel.ids.has(d.id)) libSel.ids.delete(d.id); else libSel.ids.add(d.id);
+      renderLibSelection();
+      return;
+    }
     if (e.target.closest('.doc-more')) {
       menuDoc = d;
       $('#docMenuTitle').textContent = d.name;
@@ -1024,12 +1201,12 @@
       try {
         const result = await processPage(p);
         if (p.rev !== rev) continue; // wurde inzwischen geändert und neu eingereiht
-        Object.assign(p, result, { pending: false, error: false, procKey: uid() });
+        Object.assign(p, result, { pending: false, error: false, procKey: uid(), turn: 0 });
         if (p.camSession && p.camSession === cam.session && blurLevel(p) && topScreen() === 'camera') warnBlurInCamera(p);
         if (settings.ocr && !p.deleted) ensureOcr(p).catch(() => {}); // Text im Hintergrund erkennen
       } catch (e) {
         console.error(e);
-        if (p.rev === rev) { p.pending = false; p.error = true; }
+        if (p.rev === rev) { p.pending = false; p.error = true; p.turn = 0; }
       }
       renderCard(p);
       if (editor.page === p) updatePreview();
@@ -1383,7 +1560,11 @@
     if (sel.on) open.setAttribute('aria-pressed', String(sel.ids.has(p.id))); else open.removeAttribute('aria-pressed');
     const url = urlFor(p, 'thumb');
     const img = li.querySelector('img');
-    if (url && img.getAttribute('src') !== url) img.src = url;
+    if (url && img.getAttribute('src') !== url) {
+      img.onload = () => { if (p.turn) img.style.transform = `rotate(${p.turn}deg)${oddTurn(p.turn) ? ' scale(.75)' : ''}`; else clearTurn(img); };
+      img.src = url;
+    } else if (p.turn) img.style.transform = `rotate(${p.turn}deg)${oddTurn(p.turn) ? ' scale(.75)' : ''}`;
+    else clearTurn(img);
     img.hidden = !url;
     li.classList.toggle('loading', !!p.pending);
     li.classList.toggle('error', !!p.error);
@@ -2340,7 +2521,13 @@
     if (!p) return;
     const url = urlFor(p, 'processed');
     const img = $('#edPreview');
-    if (url && img.getAttribute('src') !== url) img.src = url;
+    if (url && img.getAttribute('src') !== url) {
+      // neues Bild: vorläufige Drehung erst entfernen, wenn es geladen ist (kein kurzes Zurückspringen)
+      const turn = p.turn || 0;
+      img.onload = () => { applyTurn(img, editor.page ? editor.page.turn || 0 : 0, $('#edPreviewWrap')); };
+      img.src = url;
+      if (turn) applyTurn(img, turn, $('#edPreviewWrap'));
+    } else applyTurn(img, p.turn || 0, $('#edPreviewWrap'));
     img.hidden = !url || adj.on;
     $('#edSpinner').hidden = !p.pending && !adj.loading;
     $('#edAdjust').disabled = !p.processed;
@@ -2501,7 +2688,28 @@
     // automatische Randerkennung bleibt: sie läuft nach dem Drehen auf dem gedrehten Bild
     for (let k = 0; k < ((steps % 4) + 4) % 4; k++) p.corners = Img.rotateCornersCW(p.corners);
     p.rotation = (((p.rotation + steps * 90) % 360) + 360) % 360;
+    // sofort sichtbar drehen, bis das neu berechnete Bild fertig ist (die Verarbeitung dauert auf dem iPad etwas)
+    if (p.processed) p.turn = (p.turn || 0) + steps * 90;
     schedule(p);
+  }
+  const oddTurn = (t) => Math.abs(Math.round((t || 0) / 90)) % 2 === 1;
+  /** Vorläufige Drehung ohne Animation entfernen (das neue Bild ist bereits richtig gedreht). */
+  function clearTurn(img) {
+    if (!img.style.transform) return;
+    img.style.transition = 'none';
+    img.style.transform = '';
+    void img.offsetWidth;
+    img.style.transition = '';
+  }
+  /** Vorläufige Drehung eines Bildes per CSS (bei 90°/270° verkleinert, damit es in den Rahmen passt). */
+  function applyTurn(img, turn, box) {
+    if (!turn) { clearTurn(img); return; }
+    let s = 1;
+    if (oddTurn(turn) && img.clientWidth && img.clientHeight) {
+      const bw = box ? box.clientWidth : img.clientWidth, bh = box ? box.clientHeight : img.clientHeight;
+      s = Math.min(1, bw / img.clientHeight, bh / img.clientWidth);
+    }
+    img.style.transform = `rotate(${turn}deg) scale(${s.toFixed(3)})`;
   }
 
   // Erkannten Text anzeigen und kopieren
@@ -2845,6 +3053,7 @@
     if (typeof opts === 'string') { const a = arguments; opts = { format: a[0], quality: a[1], ocr: !!a[3] }; onProgress = a[2]; }
     const o = { format: 'a4', orient: 'auto', margin: 0, quality: 'medium', maxBytes: 0, ocr: false, ...opts };
     onProgress = typeof onProgress === 'function' ? onProgress : () => {};
+    const pages = o.pages || currentPages(); // Standard: Seiten des geöffneten Dokuments
     const n = pages.length;
     let ocrFailed = false;
     // 1) Texterkennung (falls gewünscht) – unabhängig von der Bildgröße
@@ -2875,7 +3084,7 @@
         const text = o.ocr && p.ocr && p.ocr.key === p.procKey ? textLayer(p, L.x, L.y, L.iw / p.pw) : null;
         out.push({ jpeg: new Uint8Array(await im.blob.arrayBuffer()), pageWidth: L.pageW, pageHeight: L.pageH, x: L.x, y: L.y, w: L.iw, h: L.ih, text });
       }
-      return PDFWriter.build(out, { title: fileName().replace(/\.pdf$/, ''), producer: 'DokScan', password: o.password || null });
+      return PDFWriter.build(out, { title: o.title || fileName().replace(/\.pdf$/, ''), producer: 'DokScan', password: o.password || null });
     };
     let level = QUALITY_LEVEL[o.quality] != null ? QUALITY_LEVEL[o.quality] : 2;
     let blob = await encodeAt(level);
@@ -3023,6 +3232,7 @@
   // ---------- Einstellungen ----------
   const setDialog = $('#settingsDialog');
   $('#btnSettings').addEventListener('click', () => {
+    if (libSel.on) setLibSelecting(false);
     buildChips($('#setFilter'), settings.filter, (f) => { settings.filter = f; saveSettings(); markChips($('#setFilter'), f); });
     $('#setAutoCrop').checked = settings.autoCrop;
     $('#setAutoPdf').checked = settings.autoPdf;

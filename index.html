@@ -65,11 +65,17 @@
 
 <div class="app" id="app">
   <header class="topbar">
-    <div class="brand">
+    <div class="sel-head sel-only">
+      <button id="libSelDone" class="pill-btn" type="button">Fertig</button>
+      <span id="libSelCount" class="sel-count">Dokumente auswählen</span>
+      <button id="libSelAll" class="pill-btn" type="button">Alle</button>
+    </div>
+    <div class="brand no-sel">
       <h1>DokScan</h1>
       <p id="libInfo" class="muted">Keine Dokumente</p>
     </div>
-    <button id="btnSettings" class="icon-btn" type="button" aria-label="Einstellungen" title="Einstellungen"><svg class="ic"><use href="#i-sliders"/></svg></button>
+    <button id="libSelect" class="pill-btn no-sel" type="button" hidden title="Mehrere Dokumente auswählen, z. B. zum Versenden"><svg class="ic"><use href="#i-select"/></svg><span>Auswählen</span></button>
+    <button id="btnSettings" class="icon-btn no-sel" type="button" aria-label="Einstellungen" title="Einstellungen"><svg class="ic"><use href="#i-sliders"/></svg></button>
   </header>
   <div id="libTools" class="lib-tools" hidden>
     <div id="libFilter" class="chips" role="radiogroup" aria-label="Dokumente filtern"></div>
@@ -108,7 +114,13 @@
     <ul id="docList" class="doc-list" aria-label="Dokumente"></ul>
   </main>
 
-  <footer class="bottombar">
+  <footer id="libSelTools" class="ed-tools sel-tools sel-only">
+    <div class="tool-row">
+      <button id="libSend" class="tool accent" type="button"><svg class="ic"><use href="#i-share"/></svg><span>Senden</span></button>
+      <button id="libSelDelete" class="tool danger-tool" type="button"><svg class="ic"><use href="#i-trash"/></svg><span>Löschen</span></button>
+    </div>
+  </footer>
+  <footer class="bottombar no-sel">
     <button id="libImport" class="bar-btn" type="button"><svg class="ic"><use href="#i-image"/></svg><span>Importieren</span></button>
     <button id="libScan" class="scan-btn" type="button" aria-label="Neues Dokument scannen"><svg class="ic"><use href="#i-camera"/></svg><span>Scannen</span></button>
     <span class="bar-spacer" aria-hidden="true"></span>
@@ -488,6 +500,38 @@
       <button id="payReset" class="btn" type="button">Erkannte Werte</button>
       <button id="paySave" class="btn primary" type="button"><svg class="ic"><use href="#i-check"/></svg>Speichern</button>
     </div>
+  </form>
+</dialog>
+
+<!-- Mehrere Dokumente senden -->
+<dialog id="sendDialog" class="sheet-dialog" aria-labelledby="sendTitle">
+  <form method="dialog" class="sheet-body" id="sendForm">
+    <header class="sheet-head">
+      <h2 id="sendTitle">Dokumente senden</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+    </header>
+    <ul id="sendList" class="send-list"></ul>
+    <div class="field">
+      <span id="lblSendMode">Als</span>
+      <div class="seg" role="radiogroup" aria-labelledby="lblSendMode">
+        <label><input type="radio" name="sendmode" value="each" checked><span id="sendEachLabel">Einzelne PDFs</span></label>
+        <label><input type="radio" name="sendmode" value="one"><span>Ein PDF</span></label>
+      </div>
+    </div>
+    <p id="sendHint" class="muted small"></p>
+    <div id="sendProgress" class="progress" hidden>
+      <p id="sendProgressText" class="small">PDFs werden erstellt …</p>
+      <div class="progress-bar"><span id="sendProgressBar"></span></div>
+    </div>
+    <p id="sendError" class="error small" hidden></p>
+    <div id="sendResult" class="pdf-result" hidden>
+      <p id="sendResMeta" class="small"></p>
+      <div class="btn-row">
+        <button id="sendShare" class="btn primary" type="button"><svg class="ic"><use href="#i-share"/></svg>Teilen</button>
+        <button id="sendSave" class="btn" type="button"><svg class="ic"><use href="#i-download"/></svg>Speichern</button>
+      </div>
+    </div>
+    <button id="sendGo" class="btn primary wide" type="button"><svg class="ic"><use href="#i-pdf"/></svg>PDFs erstellen</button>
   </form>
 </dialog>
 

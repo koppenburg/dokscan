@@ -502,3 +502,21 @@ main { padding-left: calc(env(safe-area-inset-left) + 16px); padding-right: calc
 .ed-review { display: flex; align-items: center; gap: 10px; padding: 10px calc(env(safe-area-inset-right) + 16px) 10px calc(env(safe-area-inset-left) + 16px); background: var(--accent-2); border-top: 1px solid var(--border); }
 .ed-review span { flex: 1; min-width: 0; }
 .ed-review .btn { flex: none; }
+/* Drehen: sofort sichtbar, weicher Übergang */
+.ed-preview img, .card-open img { transition: transform .25s ease, opacity .2s; }
+
+/* ---------- Ablage: mehrere Dokumente auswählen ---------- */
+.app.selecting .no-sel { display: none !important; }
+.app.selecting .sel-head { display: flex !important; }
+.app.selecting .sel-tools { display: grid !important; }
+.app.selecting .doc-item { position: relative; padding-right: 52px; }
+.doc-check { display: grid !important; right: 12px; top: 50%; bottom: auto; transform: translateY(-50%); border-color: var(--border); background: var(--surface); color: var(--accent-text); }
+.doc-item.selected { outline: 3px solid var(--accent); outline-offset: -1px; }
+.doc-item.selected .doc-check { background: var(--accent); border-color: var(--accent); }
+.doc-item.selected .doc-check .ic { opacity: 1; }
+.send-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; max-height: 30vh; overflow-y: auto; }
+.send-list li { padding: 8px 10px; border-radius: 10px; background: var(--bg); overflow-wrap: anywhere; }
+/* Vorschau/Karten: Bild passt immer ganz hinein (auch querliegende Seiten im Querformat) */
+.ed-preview { display: flex; align-items: center; justify-content: center; }
+.ed-preview img, .ed-preview .adj-canvas { max-width: 100%; max-height: 100%; min-width: 0; min-height: 0; }
+.card-open { display: flex; align-items: center; justify-content: center; }

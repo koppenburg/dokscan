@@ -1,6 +1,6 @@
 'use strict';
 // Offline-Cache für die App-Dateien (stale-while-revalidate).
-const CACHE = 'dokscan-v19';
+const CACHE = 'dokscan-v20';
 // Fremdbibliotheken (Texterkennung, PDF-Import) in einem eigenen Cache, der Updates der App übersteht.
 // Nur hochzählen, wenn sich Dateien in vendor/ ändern.
 const VENDOR = 'dokscan-vendor-1';
