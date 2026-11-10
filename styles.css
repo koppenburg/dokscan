@@ -523,3 +523,6 @@ main { padding-left: calc(env(safe-area-inset-left) + 16px); padding-right: calc
 /* nur in der iOS-App sichtbar */
 .native-only { display: none !important; }
 .native .native-only { display: grid !important; }
+
+/* Links in Hinweistexten (z. B. Datenschutz) */
+.muted a { color: var(--accent); }
