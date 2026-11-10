@@ -12,7 +12,7 @@
 
   // ---------- Einstellungen ----------
   const IS_IPAD = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true, blurWarn: true, orient: 'auto', margin: 0, maxSize: 0, autoName: true, libSort: 'updated', libFilter: 'all' };
+  const DEFAULTS = { filter: 'document', autoCrop: true, autoPdf: true, format: 'a4', quality: 'medium', wideFov: IS_IPAD, camDevice: '', zoom: null, autoShoot: true, ocr: true, blurWarn: true, orient: 'auto', margin: 0, maxSize: 0, autoName: true, libSort: 'updated', libFilter: 'all', reviewScan: true };
   const settings = (() => {
     try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('dokscan.settings') || '{}') }; }
     catch { return { ...DEFAULTS }; }
@@ -215,6 +215,7 @@
     try { found = d.text ? DocName.deadlines(d.text, { letterDate: info && info.date }) : []; } catch (e) { found = []; }
     d.letter = info;
     d.autoDeadlines = found;
+    try { d.payment = d.text ? DocName.payment(d.text, { sender: info && info.sender }) : null; } catch (e) { d.payment = null; }
     return true;
   }
 
@@ -517,11 +518,144 @@
       ul.appendChild(li);
     }
     ul.hidden = !ul.children.length;
+    renderPayCard(d);
     const tagBox = $('#docTags');
     tagBox.textContent = '';
     for (const t of d.tags || []) { const c = document.createElement('span'); c.className = 'tag'; c.textContent = t; tagBox.appendChild(c); }
     tagBox.hidden = !(d.tags && d.tags.length);
   }
+  // ---------- Überweisung ----------
+  /** Überweisungsdaten: erkannte Werte, von Hand geänderte haben Vorrang. */
+  function docPayment(d) {
+    const auto = d.payment || null, ed = d.paymentEdit || null;
+    if (!auto && !ed) return null;
+    const p = { ...(auto || {}), ...(ed || {}) };
+    if (ed && ed.iban) p.directDebit = false;
+    return p;
+  }
+  const fmtEuro = (v) => v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+  async function copyText(text, what) {
+    try { await navigator.clipboard.writeText(text); }
+    catch {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch { /* egal */ }
+      ta.remove();
+    }
+    toast(`${what} kopiert.`);
+  }
+  function renderPayCard(d) {
+    const p = docPayment(d);
+    const card = $('#payCard');
+    card.hidden = !p || (!p.iban && !p.directDebit);
+    if (card.hidden) return;
+    const paid = !!d.paid;
+    card.classList.toggle('paid', paid);
+    $('#payState').textContent = paid ? `bezahlt am ${fmtDay(new Date(d.paid).toISOString().slice(0, 10))}` : p.directDebit ? 'Lastschrift' : '';
+    $('#payDebit').hidden = !p.directDebit;
+    const dl = $('#payFields');
+    dl.textContent = '';
+    const row = (label, value, copyValue, what) => {
+      if (!value) return;
+      const dt = document.createElement('dt'); dt.textContent = label;
+      const dd = document.createElement('dd');
+      const v = document.createElement('span'); v.textContent = value;
+      dd.appendChild(v);
+      if (copyValue) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'icon-btn copy-btn';
+        b.setAttribute('aria-label', `${what} kopieren`); b.title = 'Kopieren';
+        b.innerHTML = '<svg class="ic"><use href="#i-copy"/></svg>';
+        b.addEventListener('click', () => copyText(copyValue, what));
+        dd.appendChild(b);
+      }
+      dl.append(dt, dd);
+    };
+    if (!p.directDebit) row('Empfänger', p.recipient, p.recipient, 'Empfänger');
+    if (p.iban) row('IBAN', p.iban.replace(/(.{4})/g, '$1 ').trim(), p.iban, 'IBAN');
+    if (p.iban && p.bic) row('BIC', p.bic, p.bic, 'BIC');
+    if (p.amount) row('Betrag', fmtEuro(p.amount), p.amount.toFixed(2).replace('.', ','), 'Betrag');
+    if (!p.directDebit) row('Zweck', p.reference, p.reference, 'Verwendungszweck');
+    $('#payQr').hidden = !p.iban || paid;
+    $('#payPaid').hidden = !!p.directDebit && !paid;
+    $('#payPaid').innerHTML = paid ? '<svg class="ic"><use href="#i-undo"/></svg>Nicht bezahlt' : '<svg class="ic"><use href="#i-check"/></svg>Bezahlt';
+    $('#payFields').hidden = paid;
+  }
+  $('#payPaid').addEventListener('click', () => {
+    const d = currentDoc;
+    if (!d) return;
+    d.dlDone = { ...(d.dlDone || {}) };
+    const payDl = docDeadlines(d).filter((x) => x.label === 'Zahlung');
+    if (d.paid) { d.paid = null; for (const x of payDl) delete d.dlDone[x.id]; toast('Wieder als offen markiert.'); }
+    else { d.paid = Date.now(); for (const x of payDl) d.dlDone[x.id] = true; toast(payDl.length ? 'Als bezahlt markiert – Zahlungsfrist erledigt.' : 'Als bezahlt markiert.'); }
+    saveDocMeta(d);
+  });
+  // GiroCode (QR-Code nach EPC069-12) mit lokal eingebundener Bibliothek
+  let qrLib = null;
+  function loadQr() {
+    if (!qrLib) {
+      qrLib = new Promise((resolve, reject) => {
+        if (window.qrcode) { resolve(window.qrcode); return; }
+        const sc = document.createElement('script');
+        sc.src = 'vendor/qrcode/qrcode.js';
+        sc.onload = () => (window.qrcode ? resolve(window.qrcode) : reject(new Error('QR-Code konnte nicht geladen werden')));
+        sc.onerror = () => reject(new Error('QR-Code konnte nicht geladen werden' + (navigator.onLine ? '' : ' – beim ersten Mal ist eine Internetverbindung nötig')));
+        document.head.appendChild(sc);
+      }).catch((e) => { qrLib = null; throw e; });
+    }
+    return qrLib;
+  }
+  function qrSvg(qrcode, text) {
+    qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
+    const q = qrcode(0, 'M');
+    q.addData(text, 'Byte');
+    q.make();
+    const n = q.getModuleCount(), quiet = 4, size = n + quiet * 2;
+    let path = '';
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (q.isDark(r, c)) path += `M${c + quiet} ${r + quiet}h1v1h-1z`;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges"><rect width="${size}" height="${size}" fill="#fff"/><path d="${path}" fill="#000"/></svg>`;
+  }
+  $('#payQr').addEventListener('click', async () => {
+    const d = currentDoc, p = d && docPayment(d);
+    if (!p || !p.iban) return;
+    try {
+      const lib = await loadQr();
+      $('#qrBox').innerHTML = qrSvg(lib, DocName.giroCode(p)); // eigener SVG-Text aus Zahlen, keine Nutzerdaten im Markup
+      $('#qrSummary').textContent = [p.recipient, p.amount ? fmtEuro(p.amount) : null, p.reference].filter(Boolean).join(' · ');
+      $('#qrDialog').showModal();
+    } catch (e) { toast(e.message || 'QR-Code nicht möglich.', null, 5000); }
+  });
+  // Überweisungsdaten bearbeiten
+  const payDialog = $('#payDialog');
+  function fillPayDialog(p) {
+    $('#payRec').value = (p && p.recipient) || '';
+    $('#payIban').value = p && p.iban ? p.iban.replace(/(.{4})/g, '$1 ').trim() : '';
+    $('#payBic').value = (p && p.bic) || '';
+    $('#payAmount').value = p && p.amount ? p.amount.toFixed(2).replace('.', ',') : '';
+    $('#payRef').value = (p && p.reference) || '';
+    $('#payError').hidden = true;
+  }
+  $('#payEdit').addEventListener('click', () => { if (currentDoc) { fillPayDialog(docPayment(currentDoc)); payDialog.showModal(); } });
+  $('#payReset').addEventListener('click', () => { fillPayDialog(currentDoc && currentDoc.payment); });
+  function savePayment() {
+    const d = currentDoc;
+    if (!d) return;
+    const err = (m) => { $('#payError').textContent = m; $('#payError').hidden = false; };
+    const iban = $('#payIban').value.replace(/\s+/g, '').toUpperCase();
+    if (iban && !DocName.ibanValid(iban)) return err('Die IBAN ist ungültig (Prüfziffer stimmt nicht). Bitte genau vergleichen.');
+    const bic = $('#payBic').value.replace(/\s+/g, '').toUpperCase();
+    if (bic && !/^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(bic)) return err('Die BIC hat 8 oder 11 Zeichen.');
+    const amtRaw = $('#payAmount').value.trim().replace(/\s|€/g, '');
+    const amount = amtRaw ? Number(amtRaw.replace(/\.(?=\d{3}(\D|$))/g, '').replace(',', '.')) : null;
+    if (amtRaw && !(amount > 0 && amount < 1e9)) return err('Bitte den Betrag wie „89,90“ eingeben.');
+    d.paymentEdit = { iban: iban || null, bic: bic || null, recipient: $('#payRec').value.trim() || null, amount, reference: $('#payRef').value.trim() || null };
+    payDialog.close();
+    saveDocMeta(d);
+  }
+  $('#paySave').addEventListener('click', savePayment);
+  $('#payForm').addEventListener('submit', (e) => { e.preventDefault(); savePayment(); });
+
   function saveDocMeta(d) {
     DB.putDoc(d);
     renderLibrary();
@@ -1900,11 +2034,13 @@
   function onCameraClosed() {
     stopStream();
     const wasRetake = !!cam.retake && !cam.retakeStay;
+    const session = cam.session;
     cam.retake = null;
     cam.retakeStay = false;
     cam.session = null;
     if (wasRetake) { cam.added = 0; return; }
-    const auto = cam.done && cam.added > 0 && settings.autoPdf;
+    const done = cam.done && cam.added > 0;
+    const auto = done && settings.autoPdf;
     const fromLibrary = cam.newDoc;
     cam.newDoc = false;
     cam.added = 0;
@@ -1914,9 +2050,17 @@
         if (!currentDoc) return;
         await openDoc(currentDoc);
       }
+      // Prüfschritt: neue Seiten groß ansehen, bevor das PDF entsteht
+      if (done && settings.reviewScan) {
+        await whenAdded();
+        const first = pages.find((p) => p.camSession === session);
+        if (first && topScreen() === 'docview') { openEditor(first, { review: { auto, session } }); return; }
+      }
       if (auto) openPdf(true);
     }, 50);
   }
+  /** Wartet, bis die gerade aufgenommenen Fotos als Seiten angelegt sind (nicht auf die Verarbeitung). */
+  async function whenAdded() { if (adding.size) await Promise.allSettled([...adding]); }
 
   /** Hinweis in der Kamera: letzte Aufnahme unscharf → direkt neu aufnehmen (Kamera bleibt offen). */
   function warnBlurInCamera(p) {
@@ -2116,8 +2260,9 @@
   }
   const markChips = (container, value) => container.querySelectorAll('.chip').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.value === value)));
 
-  function openEditor(p) {
+  function openEditor(p, opts = {}) {
     editor.page = p;
+    editor.review = opts.review || null;
     buildChips($('#filterChips'), p.filter, (f) => {
       if (editor.page.filter === f) return;
       editor.page.filter = f;
@@ -2127,7 +2272,18 @@
     openScreen('editor');
     showCropUi(false);
     updateEditor();
+    $('#edReview').hidden = !editor.review;
+    if (editor.review) {
+      $('#edReviewDone').querySelector('span').textContent = editor.review.auto ? 'PDF erstellen' : 'Fertig';
+      $('#edReviewInfo').textContent = 'Alle Seiten durchwischen und bei Bedarf korrigieren.';
+    }
   }
+  $('#edReviewDone').addEventListener('click', () => {
+    const r = editor.review;
+    if (!r) return;
+    closeScreen();
+    if (r.auto) setTimeout(() => openPdf(true), 60);
+  });
 
   /** Zur vorherigen/nächsten Seite blättern (Pfeile am Bildrand, Wischen, Pfeiltasten). */
   function goToPage(delta) {
@@ -2170,7 +2326,7 @@
     const p = editor.page;
     if (!p) return;
     const i = pages.indexOf(p);
-    $('#edTitle').textContent = `Seite ${i + 1} von ${pages.length}`;
+    $('#edTitle').textContent = editor.review ? `Prüfen ${i + 1}/${pages.length}` : `Seite ${i + 1} von ${pages.length}`;
     updateNav();
     $('#edMovePrev').disabled = i <= 0;
     $('#edMoveNext').disabled = i >= pages.length - 1;
@@ -2198,6 +2354,8 @@
     if (editor.crop) endCrop();
     if (adj.on) endAdjust('cancel');
     editor.page = null;
+    editor.review = null;
+    $('#edReview').hidden = true;
   }
 
   // ---------- Helligkeit und Kontrast ----------
@@ -2394,6 +2552,14 @@
   $('#edDelete').addEventListener('click', () => {
     const p = editor.page;
     if (!p) return;
+    // beim Prüfen auf der nächsten Seite weitermachen statt den Editor zu schließen
+    if (editor.review && pages.length > 1) {
+      const i = pages.indexOf(p);
+      deletePages([p]);
+      editor.page = pages[Math.min(i, pages.length - 1)];
+      updateEditor();
+      return;
+    }
     closeScreen();
     deletePages([p]);
   });
@@ -2865,6 +3031,7 @@
     $('#setOcr').checked = settings.ocr;
     $('#setBlurWarn').checked = settings.blurWarn;
     $('#setAutoName').checked = settings.autoName;
+    $('#setReview').checked = settings.reviewScan;
     syncSettingDeps();
     refreshStorageInfo();
     setDialog.showModal();
@@ -2877,6 +3044,7 @@
   $('#setAutoCrop').addEventListener('change', (e) => { settings.autoCrop = e.target.checked; saveSettings(); syncSettingDeps(); });
   $('#setAutoPdf').addEventListener('change', (e) => { settings.autoPdf = e.target.checked; saveSettings(); });
   $('#setWideFov').addEventListener('change', (e) => { settings.wideFov = e.target.checked; saveSettings(); });
+  $('#setReview').addEventListener('change', (e) => { settings.reviewScan = e.target.checked; saveSettings(); });
   $('#setAutoName').addEventListener('change', (e) => {
     settings.autoName = e.target.checked;
     saveSettings();
@@ -3060,6 +3228,7 @@
     if (legacy && !legacy.thumb) refreshDocMeta(LEGACY_DOC);
     autoNameAll(); // ältere, noch nicht benannte Dokumente
     for (const d of docs) if (d.metaKey === undefined && d.text && updateLetterMeta(d, null)) DB.putDoc(d);
+    for (const d of docs) if (d.payment === undefined && d.text) { try { d.payment = DocName.payment(d.text, { sender: d.letter && d.letter.sender }); } catch { d.payment = null; } DB.putDoc(d); }
     renderLibrary();
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
       // Neue Version aktiv → neu laden, sobald nichts offen ist (Seiten sind gespeichert)

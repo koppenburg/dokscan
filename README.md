@@ -9,6 +9,8 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 - **Dokumentenablage:** Jeder Scan wird als eigenes Dokument gespeichert (Vorschau, Name, Seitenzahl, Datum). **Suche** über Namen *und* erkannten Text, Umbenennen mit Namensvorschlägen aus dem Text, Löschen, später weitere Seiten ergänzen.
 - **Ordnen:** Schlagwörter je Dokument (mit Vorschlägen aus dem Brief: Absender, Art, Jahr), Filter nach Schlagwort oder „Fristen“, Sortierung nach zuletzt geändert, Briefdatum (mit Monatsgruppen), Absender (gruppiert) oder Name. Die Suche findet auch Schlagwörter und Absender.
 - **Fristen und Termine:** Aus dem Text erkannt – z. B. „zahlbar bis 16.11.2026“, „fällig am …“, „Termin am Dienstag, 24.11.2026 um 9:30 Uhr“, „Angebot gültig bis …“ sowie relative Fristen wie „Einspruch innerhalb eines Monats nach Bekanntgabe“ (ab Briefdatum berechnet, als „bitte prüfen“ markiert). Anzeige in der Ablage (farbig, wenn bald fällig oder überfällig) und im Dokument mit „In den Kalender“ (Kalendereintrag mit Erinnerung), „Erledigt“, Bearbeiten und eigenen Fristen.
+- **Überweisung aus der Rechnung:** IBAN (mit Prüfziffer, OCR-Fehler wie O/0 werden korrigiert), BIC, Empfänger, Betrag und Verwendungszweck (Rechnungs-, Kunden-, Steuernummer, Kassenzeichen …) werden erkannt. Im Dokument lässt sich jedes Feld einzeln kopieren; „GiroCode“ zeigt einen QR-Code für Banking-Apps (EPC-QR). Werte lassen sich korrigieren; „Bezahlt“ erledigt auch die Zahlungsfrist. Bei Lastschrift weist die App darauf hin, dass keine Überweisung nötig ist.
+- **Prüfschritt nach dem Scannen:** Nach „Fertig“ werden die neuen Seiten groß angezeigt (wischen zum Blättern, neu aufnehmen, zuschneiden, drehen, löschen), erst dann entsteht das PDF. Abschaltbar in den Einstellungen.
 - **Automatische Benennung:** Aus dem erkannten Text der ersten Seite werden Datum, Absender und Art des Schreibens ermittelt, z. B. „2026-10-28 Stadtwerke Musterstadt Stromrechnung“ oder „2026-09-14 Finanzamt Musterstadt Einkommensteuerbescheid“. Der Name passt sich an, solange er nicht von Hand geändert wurde; leeres Namensfeld = wieder automatisch. Importierte PDFs behalten ihren Dateinamen, außer bei Namen wie „Scan_0001.pdf“. Abschaltbar in den Einstellungen.
 - **Serienaufnahme** mit der Rückkamera (Live-Vorschau, Auslöser, Licht/Taschenlampe falls verfügbar).
 - **Automatisch auslösen:** Liegt das Dokument ca. 1 Sekunde ruhig im Bild, wird das Foto von selbst gemacht (Fortschrittsring am Auslöser). Danach wartet die App, bis die nächste Seite aufgelegt ist – so entsteht kein Doppelfoto. Ein-/ausschaltbar über „Auto“ in der Kamera.
@@ -75,6 +77,7 @@ python3 -m http.server 8000
 | `pdfimport.js`, `vendor/pdfjs/` | PDF-Import (pdf.js, lokal eingebunden) |
 | `naming.js` | Namensvorschlag aus dem Text (Datum, Absender, Dokumentart) |
 | `backup.js` | Datensicherung der Ablage als ZIP (ohne fremde Bibliothek) |
+| `vendor/qrcode/` | QR-Code für den GiroCode (qrcode-generator, MIT, lädt bei Bedarf) |
 | `sw.js`, `manifest.webmanifest`, Icons | PWA / Offline |
 
 Nach Änderungen an App-Dateien `CACHE` in `sw.js` hochzählen, damit installierte Apps die neue Version laden.

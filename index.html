@@ -57,6 +57,8 @@
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
     <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-euro" viewBox="0 0 24 24"><path d="M18 6.5A7 7 0 1 0 18 17.5"/><path d="M4 10h10M4 14h10"/></symbol>
+    <symbol id="i-qr" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v1M14 20h1M17 17h4v4h-4"/></symbol>
     <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   </defs>
 </svg>
@@ -131,6 +133,20 @@
   </header>
   <main id="overview">
     <section id="docMetaBar" class="doc-meta-bar no-sel" aria-label="Fristen und Schlagwörter">
+      <section id="payCard" class="pay-card" hidden aria-labelledby="payTitle">
+        <header class="pay-head">
+          <svg class="ic"><use href="#i-euro"/></svg>
+          <b id="payTitle">Überweisung</b>
+          <span id="payState" class="muted small"></span>
+          <button id="payEdit" class="icon-btn" type="button" aria-label="Überweisungsdaten bearbeiten" title="Bearbeiten"><svg class="ic"><use href="#i-pencil"/></svg></button>
+        </header>
+        <p id="payDebit" class="muted small" hidden>Der Betrag wird per Lastschrift abgebucht – keine Überweisung nötig.</p>
+        <dl id="payFields" class="pay-fields"></dl>
+        <div id="payActs" class="btn-row">
+          <button id="payQr" class="btn" type="button"><svg class="ic"><use href="#i-qr"/></svg>GiroCode</button>
+          <button id="payPaid" class="btn" type="button"><svg class="ic"><use href="#i-check"/></svg>Bezahlt</button>
+        </div>
+      </section>
       <ul id="dlList" class="dl-list" aria-label="Fristen und Termine"></ul>
       <div class="tag-row">
         <div id="docTags" class="chips wrap" aria-label="Schlagwörter"></div>
@@ -223,6 +239,10 @@
     <svg class="ic"><use href="#i-warn"/></svg>
     <span id="edBlurText">Foto wirkt unscharf.</span>
     <button id="edBlurRetake" class="btn small-btn" type="button">Neu aufnehmen</button>
+  </div>
+  <div id="edReview" class="ed-review" hidden>
+    <span id="edReviewInfo" class="small">Seiten prüfen: neu aufnehmen, zuschneiden, drehen oder löschen.</span>
+    <button id="edReviewDone" class="btn primary small-btn" type="button"><svg class="ic"><use href="#i-check"/></svg><span>PDF erstellen</span></button>
   </div>
   <div id="edTools" class="ed-tools">
     <div class="filter-row">
@@ -438,6 +458,39 @@
   </form>
 </dialog>
 
+<!-- GiroCode -->
+<dialog id="qrDialog" class="sheet-dialog" aria-labelledby="qrTitle">
+  <form method="dialog" class="sheet-body">
+    <header class="sheet-head">
+      <h2 id="qrTitle">GiroCode</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+    </header>
+    <div id="qrBox" class="qr-box" role="img" aria-label="QR-Code für die Überweisung"></div>
+    <p id="qrSummary" class="small center"></p>
+    <p class="muted small">Mit der Banking-App eines anderen Geräts scannen (z. B. „Foto-Überweisung“ oder „QR-Code scannen“). Auf diesem Gerät die Daten in der Überweisungs-Karte einzeln kopieren. Vor dem Absenden bitte prüfen.</p>
+  </form>
+</dialog>
+
+<!-- Überweisung bearbeiten -->
+<dialog id="payDialog" class="sheet-dialog" aria-labelledby="payDlgTitle">
+  <form method="dialog" class="sheet-body" id="payForm">
+    <header class="sheet-head">
+      <h2 id="payDlgTitle">Überweisung</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg class="ic"><use href="#i-x"/></svg></button>
+    </header>
+    <label class="field"><span>Empfänger</span><span class="input-suffix"><input id="payRec" type="text" maxlength="70" autocomplete="off"></span></label>
+    <label class="field"><span>IBAN</span><span class="input-suffix"><input id="payIban" type="text" maxlength="42" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="DE00 0000 0000 0000 0000 00"></span></label>
+    <label class="field"><span>BIC (optional)</span><span class="input-suffix"><input id="payBic" type="text" maxlength="11" autocomplete="off" autocapitalize="characters" spellcheck="false"></span></label>
+    <label class="field"><span>Betrag</span><span class="input-suffix"><input id="payAmount" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00"><span>€</span></span></label>
+    <label class="field"><span>Verwendungszweck</span><span class="input-suffix"><input id="payRef" type="text" maxlength="140" autocomplete="off"></span></label>
+    <p id="payError" class="error small" hidden></p>
+    <div class="btn-row">
+      <button id="payReset" class="btn" type="button">Erkannte Werte</button>
+      <button id="paySave" class="btn primary" type="button"><svg class="ic"><use href="#i-check"/></svg>Speichern</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- Aktionen für ein Dokument -->
 <dialog id="docMenu" class="sheet-dialog" aria-labelledby="docMenuTitle">
   <form method="dialog" class="sheet-body">
@@ -470,6 +523,7 @@
     <label class="switch"><input id="setWideFov" type="checkbox"><span class="track"></span><span>Weites Sichtfeld<br><span class="muted small">Kamerabild ohne Zuschnitt (empfohlen für iPad), etwas geringere Auflösung</span></span></label>
     <label class="switch"><input id="setOcr" type="checkbox"><span class="track"></span><span>Texterkennung (OCR)<br><span class="muted small">Text wird im Hintergrund erkannt, PDF wird durchsuchbar. Beim ersten Start werden ca. 7 MB geladen, danach geht es offline.</span></span></label>
     <label class="switch"><input id="setAutoName" type="checkbox"><span class="track"></span><span>Dokumente automatisch benennen<br><span class="muted small">Name aus Datum, Absender und Art des Schreibens, z. B. „2026-11-05 Finanzamt Musterstadt Bescheid“ (braucht die Texterkennung)</span></span></label>
+    <label class="switch"><input id="setReview" type="checkbox"><span class="track"></span><span>Nach dem Scannen Seiten prüfen<br><span class="muted small">Alle neuen Seiten groß ansehen – mit Neu aufnehmen, Zuschnitt, Drehen und Löschen –, bevor das PDF entsteht</span></span></label>
     <label class="switch"><input id="setAutoPdf" type="checkbox"><span class="track"></span><span>Nach dem Scannen automatisch PDF erstellen</span></label>
     <div class="field backup">
       <span>Datensicherung</span>
