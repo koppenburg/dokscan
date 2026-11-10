@@ -43,6 +43,10 @@ Alles läuft lokal im Browser – es werden keine Bilder hochgeladen, es gibt ke
 4. Das Dokument bleibt in der Ablage: antippen zum Ansehen, Ergänzen (Scannen/Importieren) oder erneuten PDF-Export; Name antippen zum Umbenennen.
 5. Seite antippen, um Zuschnitt, Drehung, Filter, Helligkeit/Kontrast oder Reihenfolge zu ändern; „Text“ zeigt den erkannten Text.
 
+## Als iPad-/iPhone-App
+
+Im Ordner [`native/`](native/README.md) liegt eine iOS-App (Capacitor) mit dauerhaftem Speicher, Teilen über das iOS-Menü und Erinnerungen an Fristen als Mitteilungen. Bauen mit Xcode auf dem Mac – Anleitung in [`native/README.md`](native/README.md).
+
 ## Online nutzen
 
 **https://koppenburg.github.io/dokscan/**

@@ -1,0 +1,21 @@
+{
+  "name": "dokscan-native",
+  "private": true,
+  "version": "1.0.0",
+  "description": "DokScan als iPad-/iPhone-App (Capacitor-Hülle um die Web-App im übergeordneten Ordner)",
+  "scripts": {
+    "web": "node scripts/copy-web.mjs",
+    "sync": "node scripts/copy-web.mjs && cap sync ios",
+    "open": "cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/core": "8.6.0",
+    "@capacitor/filesystem": "8.1.5",
+    "@capacitor/ios": "8.6.0",
+    "@capacitor/local-notifications": "8.3.1",
+    "@capacitor/share": "8.0.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.6.0"
+  }
+}
