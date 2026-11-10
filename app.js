@@ -24,9 +24,11 @@
   const LEGACY_DOC = 'doc-legacy';
   const DB = (() => {
     let dbp = null;
+    let lastError = null; // letzter Fehler beim Öffnen (für eine passende Meldung)
     const open = () => {
       if (!dbp) {
         dbp = new Promise((resolve, reject) => {
+          if (!window.indexedDB) throw new DOMException('IndexedDB fehlt', 'NotSupportedError');
           const r = indexedDB.open('dokscan', 2);
           r.onupgradeneeded = (e) => {
             const db = r.result;
@@ -62,7 +64,8 @@
           };
           r.onerror = () => reject(r.error);
           r.onblocked = () => console.warn('Datenbank wird von einem anderen Tab blockiert');
-        }).catch((e) => { console.warn('Datenbank nicht verfügbar', e); dbp = null; return null; });
+        }).then((db) => { lastError = null; return db; })
+          .catch((e) => { console.warn('Datenbank nicht verfügbar', e); lastError = e || new DOMException('Unbekannt', 'UnknownError'); dbp = null; return null; });
         const mine = dbp;
       }
       return dbp;
@@ -74,19 +77,55 @@
       t.onerror = () => reject(t.error);
       t.onabort = () => reject(t.error || new DOMException('Abgebrochen', 'AbortError'));
     });
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const transient = (e) => !e || ['InvalidStateError', 'UnknownError', 'TransactionInactiveError', 'AbortError', 'TimeoutError'].includes(e.name);
+    // Schreibvorgänge, die (noch) nicht gespeichert werden konnten – werden automatisch wiederholt
+    const pending = [];
+    let retryTimer = null, retries = 0, flushing = 0;
+    /** Ein Versuch: öffnen (mit kurzen Wiederholungen, iOS verliert die Verbindung z. B. nach dem Hintergrund) und ausführen. */
+    async function attempt(store, mode, fn) {
+      let err = null;
+      for (let i = 0; i < 3; i++) {
+        if (i) { dbp = null; await wait(i === 1 ? 150 : 600); }
+        const db = await open();
+        if (!db) { err = lastError; if (!transient(err)) break; continue; }
+        try { return { ok: true, value: await tx(db, store, mode, fn) }; }
+        catch (e) { err = e; if (!transient(e)) break; }
+      }
+      return { ok: false, error: err };
+    }
+    function scheduleRetry() {
+      if (retryTimer || !pending.length) return;
+      retryTimer = setTimeout(flush, Math.min(30000, 2000 * 2 ** Math.min(retries, 4)));
+    }
+    async function flush() {
+      retryTimer = null;
+      if (!pending.length) return;
+      retries++;
+      const list = pending.splice(0);
+      const failed = [];
+      flushing += list.length;
+      for (const job of list) {
+        const r = await attempt(job.store, job.mode, job.fn);
+        flushing--;
+        if (!r.ok) failed.push(job);
+      }
+      if (failed.length) { pending.unshift(...failed); scheduleRetry(); }
+      else if (pending.length) scheduleRetry(); // während des Nachspeicherns hinzugekommen
+      else { retries = 0; storageRecovered(); }
+    }
+    // beim Zurückkehren in die App sofort erneut versuchen
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && pending.length) { clearTimeout(retryTimer); retryTimer = null; flush(); } });
     const run = async (store, mode, fn) => {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const db = await open();
-          if (!db) { if (mode === 'readwrite') storageFailed(null); return undefined; }
-          return await tx(db, store, mode, fn);
-        } catch (e) {
-          // geschlossene Verbindung: einmal neu verbinden und wiederholen
-          if (attempt === 0 && e && (e.name === 'InvalidStateError' || e.name === 'UnknownError' || e.name === 'TransactionInactiveError')) { dbp = null; continue; }
-          console.warn('Speichern nicht möglich', e);
-          if (mode === 'readwrite') storageFailed(e);
-          return undefined;
-        }
+      // Reihenfolge wahren: solange ältere Schreibvorgänge warten, neue hinten anstellen
+      if (mode === 'readwrite' && (pending.length || flushing)) { pending.push({ store, mode, fn }); scheduleRetry(); return undefined; }
+      const r = await attempt(store, mode, fn);
+      if (r.ok) return r.value;
+      console.warn('Speichern nicht möglich', r.error);
+      if (mode === 'readwrite') {
+        const quota = r.error && (r.error.name === 'QuotaExceededError' || /quota/i.test(r.error.message || ''));
+        if (!quota && transient(r.error)) { pending.push({ store, mode, fn }); scheduleRetry(); }
+        storageFailed(r.error, pending.length > 0);
       }
       return undefined;
     };
@@ -105,6 +144,8 @@
       putDoc: (doc) => run('docs', 'readwrite', (s) => s.put(doc)),
       delDoc: (id) => run('docs', 'readwrite', (s) => s.delete(id)),
       /** Dokument samt Seiten in einer Transaktion löschen. */
+      pendingCount: () => pending.length + flushing,
+      retryNow: () => { clearTimeout(retryTimer); retryTimer = null; return flush(); },
       delDocAll: (id) => run(['docs', 'pages'], 'readwrite', (s) => {
         const t = s.transaction;
         t.objectStore('docs').delete(id);
@@ -118,16 +159,27 @@
   })();
 
   // Speicherfehler sichtbar machen (sonst wären die Seiten nach dem Neuladen still verloren)
-  let storageWarnAt = 0;
-  function storageFailed(e) {
+  let storageWarnAt = 0, storageWarned = false;
+  function storageFailed(e, willRetry) {
     const now = Date.now();
     if (now - storageWarnAt < 15000) return;
     storageWarnAt = now;
-    const full = e && (e.name === 'QuotaExceededError' || /quota/i.test(e.message || ''));
-    const msg = !e ? 'Speichern nicht möglich: Dieser Browser erlaubt keinen Speicher (privater Modus?). Seiten gehen beim Schließen verloren.'
-      : full ? 'Gerätespeicher voll – Seiten konnten nicht gespeichert werden. Bitte Platz schaffen oder Dokumente löschen.'
-        : 'Speichern fehlgeschlagen – bitte die App neu laden, bevor du weiterscannst.';
+    storageWarned = true;
+    const name = (e && e.name) || 'UnknownError';
+    const full = name === 'QuotaExceededError' || /quota/i.test((e && e.message) || '');
+    let msg;
+    if (full) msg = 'Gerätespeicher voll – Seiten konnten nicht gespeichert werden. Bitte Platz schaffen oder Dokumente löschen.';
+    else if (name === 'SecurityError' || name === 'NotSupportedError' || name === 'NotAllowedError') {
+      msg = 'Speichern blockiert: In Safari ist vermutlich „Alle Cookies blockieren“ (Einstellungen › Apps › Safari) oder der private Modus aktiv. Bitte ausschalten – sonst gehen die Seiten beim Schließen verloren.';
+    } else if (willRetry) msg = 'Verbindung zum Gerätespeicher kurz unterbrochen – die App speichert automatisch nach. Bitte die App noch nicht schließen.';
+    else msg = `Speichern fehlgeschlagen (${name}). Bitte die App schließen und neu öffnen – vorher ggf. ein PDF erstellen.`;
     setTimeout(() => toast(msg, null, 9000), 0);
+  }
+  function storageRecovered() {
+    if (!storageWarned) return;
+    storageWarned = false;
+    storageWarnAt = 0;
+    setTimeout(() => toast('Alles gespeichert.'), 0);
   }
 
   function docDefaultName(t) {
@@ -3468,5 +3520,5 @@
   init();
 
   // Für Tests
-  window.DokScan = { backupFile: async () => (await Backup.create(docs.slice(), (id) => DB.pagesOf(id))).blob, get pages() { return pages; }, get docs() { return docs; }, get currentDoc() { return currentDoc; }, get liveCount() { return live.count || 0; }, whenIdle, addFiles, buildPdf, settings, workerReady: () => Proc.init(), ensureOcr, openDoc, importInto };
+  window.DokScan = { db: DB, backupFile: async () => (await Backup.create(docs.slice(), (id) => DB.pagesOf(id))).blob, get pages() { return pages; }, get docs() { return docs; }, get currentDoc() { return currentDoc; }, get liveCount() { return live.count || 0; }, whenIdle, addFiles, buildPdf, settings, workerReady: () => Proc.init(), ensureOcr, openDoc, importInto };
 })();
