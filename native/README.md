@@ -34,13 +34,48 @@ In Xcode:
 3. iPad per Kabel anschließen und oben als Ziel auswählen, dann ▶︎ (**Run**).
    Beim ersten Mal auf dem iPad: *Einstellungen › Datenschutz & Sicherheit › Entwicklermodus* einschalten und neu starten.
 
-## Über TestFlight installieren (empfohlen)
+## Über TestFlight verteilen
 
-1. In [App Store Connect](https://appstoreconnect.apple.com) unter *Apps* eine neue App anlegen (Bundle-ID wie in Xcode, Name z. B. „DokScan“).
-2. In Xcode oben als Ziel **Any iOS Device (arm64)** wählen → *Product › Archive*.
-3. Im Fenster *Organizer*: **Distribute App** → **App Store Connect** → **Upload**.
-4. In App Store Connect unter *TestFlight* dich selbst als internen Tester eintragen, auf dem iPad die App **TestFlight** öffnen und DokScan installieren.
-   Hinweis: Bei der Frage zur Exportkontrolle („Verschlüsselung“) – DokScan nutzt Verschlüsselung nur für den Passwortschutz von PDFs über die Standardfunktionen von iOS.
+Voraussetzung: **bezahlte** Mitgliedschaft im Apple Developer Program (mit einer kostenlosen Apple-ID geht TestFlight nicht).
+
+### 1. App in App Store Connect anlegen (einmalig)
+
+[App Store Connect](https://appstoreconnect.apple.com) → *Apps* → **+** → *Neue App*:
+Plattform iOS, Name „DokScan“ (muss im App Store frei sein, sonst z. B. „DokScan – Belege & Briefe“),
+Primärsprache Deutsch, Bundle-ID wie in Xcode (`info.koppenburg.dokscan`), SKU frei wählbar (z. B. `dokscan`).
+Taucht die Bundle-ID nicht auf: einmal in Xcode mit deinem Team bauen oder sie unter
+[Identifiers](https://developer.apple.com/account/resources/identifiers/list) anlegen.
+
+### 2. Build hochladen
+
+1. In Xcode oben als Ziel **Any iOS Device (arm64)** wählen → *Product › Archive*.
+2. Im *Organizer*: **Distribute App** → **App Store Connect** → **Distribute**.
+   Jeder Upload braucht eine neue Build-Nummer: Xcode erhöht sie dabei meist selbst („Manage Version and Build Number“),
+   sonst vorher unter *General › Build* hochzählen.
+3. Nach 5–30 Minuten erscheint der Build in App Store Connect unter *TestFlight*.
+   Die Frage zur Verschlüsselung entfällt: In `Info.plist` ist `ITSAppUsesNonExemptEncryption = NO` gesetzt,
+   weil DokScan nur die in iOS eingebaute Verschlüsselung nutzt (WebCrypto für PDF-Passwörter).
+
+### 3a. Interne Tester (sofort, ohne Prüfung durch Apple)
+
+Bis zu 100 Personen, die in *Benutzer und Zugriff* deines Teams eingetragen sind (z. B. Familie mit Rolle „Marketing“ oder „Entwickler“).
+*TestFlight* → *Interne Tests* → Gruppe anlegen → Tester hinzufügen. Sie bekommen eine Mail und installieren über die App **TestFlight**.
+
+### 3b. Externe Tester (beliebige Personen, bis 10.000)
+
+1. *TestFlight* → *Testinformationen* ausfüllen: kurze Beschreibung („Was soll getestet werden?“), Feedback-E-Mail,
+   Kontaktdaten für Apple, **Datenschutz-URL**: `https://koppenburg.github.io/dokscan/datenschutz.html`.
+   Anmeldedaten: „Keine Anmeldung erforderlich“.
+2. *Externe Tests* → Gruppe anlegen → Build hinzufügen → **Zur Beta-Prüfung einreichen**.
+   Die erste Prüfung dauert meist 1–2 Tage; spätere Builds derselben Version gehen meist ohne erneute Prüfung durch.
+3. Danach Tester per E-Mail einladen **oder** einen **öffentlichen Link** aktivieren und weitergeben.
+
+Ein TestFlight-Build läuft **90 Tage**; danach einen neuen hochladen.
+
+### Später im App Store
+
+Zusätzlich nötig: Screenshots (iPhone 6,9″ und iPad 13″), Beschreibung, Altersfreigabe-Fragebogen,
+*App-Datenschutz* → „Keine Daten erfasst“, sowie in der EU die Angabe zum **Händlerstatus** (Digital Services Act).
 
 ## Updates
 
@@ -63,4 +98,5 @@ in der Web-App *Einstellungen › Ablage sichern* → Datei in „Dateien“ spe
 | `capacitor.config.json` | App-ID, Name, Einstellungen |
 | `scripts/copy-web.mjs` | kopiert die Web-App nach `www/` (wird nicht eingecheckt) |
 | `ios/` | Xcode-Projekt (Swift Package Manager, kein CocoaPods) |
-| `ios/App/App/Info.plist` | Berechtigungstexte (Kamera, Fotos) |
+| `ios/App/App/Info.plist` | Berechtigungstexte (Kamera, Fotos), Angabe zur Verschlüsselung |
+| `ios/App/App/PrivacyInfo.xcprivacy` | Datenschutz-Manifest für Apple (kein Tracking, keine Datenerfassung) |
